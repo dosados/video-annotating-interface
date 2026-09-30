@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Annotating Interface</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color-scheme: dark; color: #eaf0f5; background: #101820; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    button, input, select { font: inherit; color: inherit; background: #223443; border: 1px solid #567084; border-radius: 6px; padding: 7px 9px; }
+    button { cursor: pointer; }
+    button:hover { background: #315269; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #81d8ff; }
+    button.active { background: #255d61; border-color: #68c6bc; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid #384c5b; }
+    h1 { font-size: 20px; margin: 0; }
+    h2 { font-size: 16px; margin: 18px 0 8px; }
+    .muted { color: #aabcc8; font-size: 13px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; min-height: calc(100vh - 68px); }
+    main { padding: 14px; min-width: 0; }
+    aside { border-left: 1px solid #384c5b; padding: 14px; }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .row label { display: inline-flex; align-items: center; gap: 5px; }
+    input[type="number"] { width: 87px; }
+    input[type="range"] { flex: 1; min-width: 120px; padding: 0; }
+    input[type="checkbox"] { width: auto; }
+    .viewer { height: min(68vh, 850px); overflow: auto; background: #02070c; border: 1px solid #384c5b; border-radius: 8px; }
+    canvas { display: block; max-width: none; cursor: crosshair; }
+    .message { min-height: 22px; color: #8bdcbf; }
+    .message.error { color: #ffb18e; }
+    .panel { border-top: 1px solid #384c5b; padding-top: 10px; margin-top: 14px; }
+    .object { display: flex; justify-content: space-between; align-items: center; gap: 8px; border: 1px solid #3d5667; border-radius: 6px; padding: 7px; margin: 6px 0; overflow-wrap: anywhere; }
+    .object button { padding: 2px 7px; }
+    .numeric { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+    .numeric label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .numeric input { width: 75px; }
+    .wide { width: 100%; margin-top: 8px; }
+    .keys { line-height: 1.7; font-size: 13px; color: #b6c8d4; }
+    kbd { border: 1px solid #526879; border-radius: 4px; padding: 1px 4px; color: #eaf0f5; }
+    @media (max-width: 900px) { .layout { display: block; } aside { border-left: 0; border-top: 1px solid #384c5b; } .viewer { height: 55vh; } }
+  </style>
+</head>
+<body>
+  <header><div><h1>Video Annotating Interface</h1><span id="source" class="muted">Loading…</span></div><strong id="progress">—</strong></header>
+  <div class="layout">
+    <main>
+      <div class="row">
+        <button id="previous">← Previous</button><button id="next">Next →</button>
+        <button id="previous-open">← Unreviewed</button><button id="next-open">Unreviewed →</button>
+        <label>Frame <input id="frame" type="number" min="0" value="0"></label>
+        <label>Step <input id="step" type="number" min="1" max="600" value="1"></label>
+      </div>
+      <div class="row"><input id="timeline" type="range" min="0" value="0"><span id="time">—</span></div>
+      <div class="viewer" id="viewer"><canvas id="canvas"></canvas></div>
+      <div class="row" style="margin-top:10px">
+        <button id="point" class="active">Point (P)</button><button id="box">Box (B)</button>
+        <button id="accept">Accept suggestions (S)</button><button id="absent">Absent (A)</button><button id="clear">Clear frame</button>
+        <label><input id="show-suggestions" type="checkbox" checked> Suggestions</label>
+        <label>Zoom <input id="zoom" type="range" min="1" max="4" step="0.25" value="1"></label><span id="zoom-value">1×</span>
+      </div>
+      <div id="message" class="message" role="status"></div>
+    </main>
+    <aside>
+      <h2>Current frame</h2><div id="frame-status">—</div><div id="objects"></div>
+      <div class="panel">
+        <h2>Enter coordinates</h2>
+        <div class="numeric">
+          <label>X <input id="x" type="number" step="any" min="0"></label>
+          <label>Y <input id="y" type="number" step="any" min="0"></label>
+          <label>Width <input id="width" type="number" step="any" min="0"></label>
+          <label>Height <input id="height" type="number" step="any" min="0"></label>
+        </div>
+        <button id="add-coordinates" class="wide">Add point</button>
+        <p class="muted">Point mode: click the video. Box mode: drag from one corner to the opposite corner. You can add several objects to one frame.</p>
+      </div>
+      <div class="panel">
+        <h2>Mark a range absent</h2>
+        <div class="row"><input id="range-start" type="number" min="0" value="0"><span>to</span><input id="range-end" type="number" min="0" value="0"></div>
+        <button id="mark-range" class="wide">Mark range absent</button>
+      </div>
+      <div class="panel keys"><h2>Keyboard</h2>
+        <kbd>←</kbd>/<kbd>→</kbd> one frame · <kbd>Shift</kbd> + arrow uses Step<br>
+        <kbd>P</kbd> point · <kbd>B</kbd> box · <kbd>S</kbd> accept suggestions · <kbd>A</kbd> absent · <kbd>N</kbd> next unreviewed<br>
+        <kbd>Enter</kbd> next frame · <kbd>Delete</kbd> clear frame
+      </div>
+      <p class="muted">Every change is saved immediately. Reopen the same video and output file to continue. Suggestions are shown in cyan and are never saved as labels automatically.</p>
+    </aside>
+  </div>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    const canvas = $('canvas'), ctx = canvas.getContext('2d');
+    let state, frame = 0, image = new Image(), requestId = 0, mode = 'point', drag = null, busy = false, frameReady = false;
+    function notice(text, error = false) { $('message').textContent = text; $('message').classList.toggle('error', error); }
+    function current() { return state.frames[String(frame)]; }
+    function coords(event) {
+      const r = canvas.getBoundingClientRect();
+      return { x: Math.max(0, Math.min(state.video.width - 0.01, (event.clientX-r.left)*state.video.width/r.width)),
+               y: Math.max(0, Math.min(state.video.height - 0.01, (event.clientY-r.top)*state.video.height/r.height)) };
+    }
+    function modeSet(value) {
+      mode = value;
+      for (const name of ['point', 'box']) $(name).classList.toggle('active', name === mode);
+      $('add-coordinates').textContent = `Add ${mode}`;
+      for (const id of ['width', 'height']) $(id).disabled = mode !== 'box';
+      canvas.style.cursor = mode === 'box' ? 'crosshair' : 'cell';
+    }
+    function resize() {
+      if (!state) return;
+      const zoom = Number($('zoom').value), base = Math.min(state.video.width, Math.max(200, $('viewer').clientWidth - 2));
+      $('zoom-value').textContent = `${zoom}×`;
+      canvas.style.width = `${Math.round(base*zoom)}px`;
+      canvas.style.height = `${Math.round(base*zoom*state.video.height/state.video.width)}px`;
+      draw();
+    }
+    function drawObject(obj, color, dashed = false) {
+      ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.setLineDash(dashed ? [9, 5] : []);
+      if (obj.type === 'point') {
+        ctx.beginPath(); ctx.arc(obj.x, obj.y, 11, 0, Math.PI*2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(obj.x-17,obj.y); ctx.lineTo(obj.x+17,obj.y); ctx.moveTo(obj.x,obj.y-17); ctx.lineTo(obj.x,obj.y+17); ctx.stroke();
+      } else ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+      ctx.setLineDash([]);
+    }
+    function draw() {
+      if (!state || !frameReady || !image.complete || !image.naturalWidth) return;
+      canvas.width = state.video.width; canvas.height = state.video.height;
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      if ($('show-suggestions').checked) for (const obj of (state.suggestions[String(frame)] || [])) drawObject(obj, '#48d8ff', true);
+      for (const obj of (current()?.objects || [])) drawObject(obj, '#ffdb66');
+      if (drag) {
+        const x = Math.min(drag.start.x, drag.end.x), y = Math.min(drag.start.y, drag.end.y);
+        drawObject({type:'box',x,y,width:Math.abs(drag.start.x-drag.end.x),height:Math.abs(drag.start.y-drag.end.y)}, '#92edba');
+      }
+    }
+    function update() {
+      const label = current(), count = Object.keys(state.frames).length;
+      $('progress').textContent = `${count} / ${state.video.frame_count} reviewed`;
+      $('frame').value = frame; $('timeline').value = frame; $('time').textContent = `${(frame/state.fps).toFixed(2)} s`;
+      $('frame-status').textContent = label ? (label.status === 'absent' ? 'Absent' : `${label.objects.length} object(s)`) : 'Unreviewed';
+      $('range-start').value = frame; $('range-end').value = frame;
+      const list = $('objects'); list.replaceChildren();
+      (label?.objects || []).forEach((obj, index) => {
+        const row = document.createElement('div'); row.className = 'object';
+        const text = document.createElement('span');
+        text.textContent = obj.type === 'point' ? `Point ${index+1}: (${obj.x}, ${obj.y})` : `Box ${index+1}: (${obj.x}, ${obj.y}), ${obj.width}×${obj.height}`;
+        const remove = document.createElement('button'); remove.textContent = 'Remove'; remove.onclick = () => removeObject(index);
+        row.append(text, remove); list.append(row);
+      });
+      const suggested = state.suggestions[String(frame)]?.length || 0;
+      if (suggested) { const info = document.createElement('p'); info.className = 'muted'; info.textContent = `${suggested} suggestion(s) in cyan`; list.append(info); }
+    }
+    function go(index) {
+      if (!state) return;
+      frame = Math.max(0, Math.min(state.video.frame_count - 1, Math.round(index)));
+      drag = null; frameReady = false; update();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const sequence = ++requestId, incoming = new Image();
+      incoming.onload = () => { if (sequence !== requestId) return; image = incoming; frameReady = true; draw(); notice(''); };
+      incoming.onerror = () => { if (sequence === requestId) notice(`Cannot load frame ${frame}`, true); };
+      incoming.src = `/api/frame?index=${frame}`;
+    }
+    function unreviewed(direction) {
+      for (let i = frame + direction; i >= 0 && i < state.video.frame_count; i += direction)
+        if (!state.frames[String(i)]) { go(i); return; }
+      notice('No unreviewed frame in that direction');
+    }
+    async function post(route, payload) {
+      if (busy) { notice('Wait for the current save to finish', true); return null; }
+      busy = true;
+      try {
+        const response = await fetch(route, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        return result;
+      } catch (error) { notice(`Save failed: ${error.message}`, true); return null; }
+      finally { busy = false; }
+    }
+    async function setLabel(status, objects, advance = false) {
+      if (!frameReady) return notice('Wait for the frame to load', true);
+      const at = frame, result = await post('/api/frame', {frame:at,status,objects});
+      if (!result) return;
+      state.frames[String(at)] = result.label; update(); draw(); notice(`Frame ${at} saved`);
+      if (advance && frame === at && at < state.video.frame_count-1) go(at+1);
+    }
+    function addObject(obj) { setLabel('annotated', [...(current()?.objects || []), obj]); }
+    function removeObject(index) {
+      const objects = [...(current()?.objects || [])]; objects.splice(index, 1);
+      if (objects.length) setLabel('annotated', objects); else clearFrame();
+    }
+    async function clearFrame() {
+      const at = frame, result = await post('/api/clear', {frame:at});
+      if (result) { delete state.frames[String(at)]; update(); draw(); notice(`Frame ${at} cleared`); }
+    }
+    canvas.addEventListener('pointerdown', event => {
+      if (!frameReady) return;
+      if (mode === 'box') { drag = {start:coords(event),end:coords(event)}; canvas.setPointerCapture(event.pointerId); draw(); }
+    });
+    canvas.addEventListener('pointermove', event => { if (drag) { drag.end = coords(event); draw(); } });
+    canvas.addEventListener('pointerup', event => {
+      if (!frameReady) return;
+      if (mode === 'point') { const p = coords(event); addObject({type:'point',x:p.x,y:p.y}); return; }
+      if (!drag) return;
+      drag.end = coords(event);
+      const x = Math.min(drag.start.x, drag.end.x), y = Math.min(drag.start.y, drag.end.y);
+      const width = Math.abs(drag.start.x-drag.end.x), height = Math.abs(drag.start.y-drag.end.y);
+      drag = null; draw();
+      if (width >= 2 && height >= 2) addObject({type:'box',x,y,width,height});
+      else notice('Drag at least 2 pixels in both directions for a box', true);
+    });
+    $('add-coordinates').onclick = () => {
+      const x = Number($('x').value), y = Number($('y').value);
+      if (!$('x').value || !$('y').value) return notice('Enter X and Y', true);
+      if (mode === 'point') addObject({type:'point',x,y});
+      else {
+        if (!$('width').value || !$('height').value) return notice('Enter width and height', true);
+        addObject({type:'box',x,y,width:Number($('width').value),height:Number($('height').value)});
+      }
+    };
+    $('point').onclick = () => modeSet('point'); $('box').onclick = () => modeSet('box');
+    $('accept').onclick = () => {
+      const objects = state.suggestions[String(frame)] || [];
+      if (!objects.length) return notice('No suggestions on this frame', true);
+      setLabel('annotated', objects, true);
+    };
+    $('absent').onclick = () => setLabel('absent', [], true); $('clear').onclick = clearFrame;
+    $('previous').onclick = () => go(frame-Number($('step').value)); $('next').onclick = () => go(frame+Number($('step').value));
+    $('previous-open').onclick = () => unreviewed(-1); $('next-open').onclick = () => unreviewed(1);
+    $('frame').onchange = () => go(Number($('frame').value)); $('timeline').oninput = () => go(Number($('timeline').value));
+    $('zoom').oninput = resize; $('show-suggestions').onchange = draw; window.addEventListener('resize', resize);
+    $('mark-range').onclick = async () => {
+      const start = Number($('range-start').value), end = Number($('range-end').value);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || end-start > 10000) return notice('Invalid range (maximum 10001 frames)', true);
+      const overwritten = Object.keys(state.frames).filter(key => Number(key)>=start && Number(key)<=end).length;
+      if (!confirm(`Mark frames ${start}–${end} absent? This replaces ${overwritten} existing frame labels.`)) return;
+      const result = await post('/api/absent-range', {start,end});
+      if (result) { for (let i=start;i<=end;i++) state.frames[String(i)]={status:'absent',objects:[]}; update(); draw(); notice(`${result.count} frames saved`); }
+    };
+    document.addEventListener('keydown', event => {
+      if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) return;
+      const key = event.key.toLowerCase();
+      if (key === 'arrowleft') { event.preventDefault(); go(frame-(event.shiftKey?Number($('step').value):1)); }
+      else if (key === 'arrowright') { event.preventDefault(); go(frame+(event.shiftKey?Number($('step').value):1)); }
+      else if (key === 'p') modeSet('point'); else if (key === 'b') modeSet('box');
+      else if (key === 's') $('accept').click(); else if (key === 'a') $('absent').click(); else if (key === 'n') unreviewed(1);
+      else if (key === 'enter') go(frame+1); else if (key === 'delete') clearFrame();
+    });
+    fetch('/api/state').then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+      .then(result => { state = result; $('source').textContent = `${state.video.name} · ${state.video.width}×${state.video.height} · ${state.fps.toFixed(2)} fps`;
+        $('timeline').max = state.video.frame_count-1; $('frame').max = state.video.frame_count-1;
+        $('range-start').max = state.video.frame_count-1; $('range-end').max = state.video.frame_count-1;
+        modeSet('point'); resize(); go(0); })
+      .catch(error => notice(`Cannot load project: ${error.message}`, true));
+  </script>
+</body>
+</html>
