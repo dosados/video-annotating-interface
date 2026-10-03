@@ -84,7 +84,7 @@
         <kbd>P</kbd> point · <kbd>B</kbd> box · <kbd>S</kbd> accept suggestions · <kbd>A</kbd> absent · <kbd>N</kbd> next unreviewed<br>
         <kbd>Enter</kbd> next frame · <kbd>Delete</kbd> clear frame
       </div>
-      <p class="muted">Every change is saved immediately. Reopen the same video and output file to continue. Suggestions are shown in cyan. Leaving a frame saves its current objects, including unchanged suggestions. Left click adds a point; right click removes a nearby object; the wheel zooms around the cursor.</p>
+      <p class="muted">Every change is saved immediately. Reopen the same video and output file to continue. Suggestions are shown in cyan. Leaving a frame saves its current objects, including unchanged suggestions. Left click adds a point or replaces the closest nearby point; right click removes a nearby object; the wheel zooms around the cursor.</p>
     </aside>
   </div>
   <script>
@@ -209,7 +209,18 @@
       state.frames[String(at)] = result.label; update(); draw(); notice(`Frame ${at} saved`);
       if (advance && frame === at && at < state.video.frame_count-1) go(at+1);
     }
-    function addObject(obj) { setLabel('annotated', [...(current()?.objects || []), obj]); }
+    function addObject(obj) {
+      const objects = [...current().objects];
+      let nearest = -1, distance = Math.min(24, 12/viewScale);
+      if (obj.type === 'point') objects.forEach((existing, index) => {
+        if (existing.type !== 'point') return;
+        const d = Math.hypot(existing.x-obj.x, existing.y-obj.y);
+        if (d < distance) { distance = d; nearest = index; }
+      });
+      if (nearest >= 0) objects[nearest] = obj;
+      else objects.push(obj);
+      return setLabel('annotated', objects);
+    }
     function removeObject(index) {
       const objects = [...(current()?.objects || [])]; objects.splice(index, 1);
       if (objects.length) setLabel('annotated', objects); else setLabel('absent', []);
