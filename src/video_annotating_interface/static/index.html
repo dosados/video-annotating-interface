@@ -211,7 +211,7 @@
     }
     function addObject(obj) {
       const objects = [...current().objects];
-      let nearest = -1, distance = 40;
+      let nearest = -1, distance = 40/viewScale;
       if (obj.type === 'point') objects.forEach((existing, index) => {
         if (existing.type !== 'point') return;
         const d = Math.hypot(existing.x-obj.x, existing.y-obj.y);
