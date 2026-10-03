@@ -55,7 +55,7 @@
       <div class="viewer" id="viewer"><canvas id="canvas"></canvas></div>
       <div class="row" style="margin-top:10px">
         <button id="point" class="active">Point (P)</button><button id="box">Box (B)</button>
-        <button id="accept">Accept suggestions (S)</button><button id="absent">Absent (A)</button><button id="clear">Remove all</button>
+        <button id="accept">Accept suggestions (C)</button><button id="absent">Absent (X)</button><button id="clear">Remove all</button>
         <label><input id="show-suggestions" type="checkbox" checked> Suggestions</label>
         <label>Zoom <input id="zoom" type="range" min="1" max="4" step="0.25" value="1"></label><span id="zoom-value">1×</span>
       </div>
@@ -80,8 +80,8 @@
         <button id="mark-range" class="wide">Mark range absent</button>
       </div>
       <div class="panel keys"><h2>Keyboard</h2>
-        <kbd>←</kbd>/<kbd>→</kbd> one frame · <kbd>Shift</kbd> + arrow uses Step<br>
-        <kbd>P</kbd> point · <kbd>B</kbd> box · <kbd>S</kbd> accept suggestions · <kbd>A</kbd> absent · <kbd>N</kbd> next unreviewed<br>
+        <kbd>A</kbd>/<kbd>D</kbd> or <kbd>←</kbd>/<kbd>→</kbd> one frame · <kbd>W</kbd>/<kbd>S</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd> uses Step<br>
+        <kbd>P</kbd> point · <kbd>B</kbd> box · <kbd>C</kbd> accept suggestions · <kbd>X</kbd> absent · <kbd>N</kbd> next unreviewed<br>
         <kbd>Enter</kbd> next frame · <kbd>Delete</kbd> clear frame
       </div>
       <p class="muted">Every change is saved immediately. Reopen the same video and output file to continue. Suggestions are shown in cyan. Leaving a frame saves its current objects, including unchanged suggestions. Left click adds a point or replaces the closest nearby point; right click removes a nearby object; the wheel zooms around the cursor.</p>
@@ -283,10 +283,12 @@
     document.addEventListener('keydown', event => {
       if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) return;
       const key = event.key.toLowerCase();
-      if (key === 'arrowleft') { event.preventDefault(); go(frame-(event.shiftKey?Number($('step').value):1)); }
-      else if (key === 'arrowright') { event.preventDefault(); go(frame+(event.shiftKey?Number($('step').value):1)); }
+      if (key === 'arrowleft' || event.code === 'KeyA') { event.preventDefault(); go(frame-(event.shiftKey?Number($('step').value):1)); }
+      else if (key === 'arrowright' || event.code === 'KeyD') { event.preventDefault(); go(frame+(event.shiftKey?Number($('step').value):1)); }
+      else if (key === 'arrowup' || event.code === 'KeyW') { event.preventDefault(); go(frame-Number($('step').value)); }
+      else if (key === 'arrowdown' || event.code === 'KeyS') { event.preventDefault(); go(frame+Number($('step').value)); }
       else if (key === 'p') modeSet('point'); else if (key === 'b') modeSet('box');
-      else if (key === 's') $('accept').click(); else if (key === 'a') $('absent').click(); else if (key === 'n') unreviewed(1);
+      else if (key === 'c') $('accept').click(); else if (key === 'x') $('absent').click(); else if (key === 'n') unreviewed(1);
       else if (key === 'enter') go(frame+1); else if (key === 'delete') clearFrame();
     });
     fetch('/api/state').then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })

@@ -1,11 +1,11 @@
 const fs=require('node:fs'), vm=require('node:vm'), assert=require('node:assert/strict');
-const elements=new Map(), calls=[];
+const elements=new Map(), calls=[], documentListeners={};
 function element(id) {
  if (!elements.has(id)) elements.set(id,{value:'1',checked:true,clientWidth:800,clientHeight:400,width:800,height:400,style:{},classList:{toggle(){}},listeners:{},addEventListener(name,fn){this.listeners[name]=fn},getBoundingClientRect(){return {left:0,top:0,width:800,height:400}},getContext(){return new Proxy({},{get:()=>()=>{}})},replaceChildren(){},append(){},setPointerCapture(){}});
  return elements.get(id);
 }
 const state={video:{name:'test',width:1920,height:1080,frame_count:5},fps:60,frames:{},suggestions:{'0':[{type:'point',x:100,y:100}],'1':[{type:'point',x:200,y:200}]}};
-const context=vm.createContext({console,Math,Number,Object,String,Array,Error,document:{getElementById:element,createElement:()=>element(Math.random()),addEventListener(){},activeElement:{tagName:'BODY'}},window:{},ResizeObserver:class{observe(){}},Image:class{complete=true;naturalWidth=1920;set src(v){queueMicrotask(()=>this.onload())}},fetch:async(route,options)=>{if(!options)return {ok:true,json:async()=>state};const body=JSON.parse(options.body);calls.push(body);return {ok:true,json:async()=>({label:{status:body.status,objects:body.objects}})}},queueMicrotask,confirm:()=>true});
+const context=vm.createContext({console,Math,Number,Object,String,Array,Error,document:{getElementById:element,createElement:()=>element(Math.random()),addEventListener(name,fn){documentListeners[name]=fn},activeElement:{tagName:'BODY'}},window:{},ResizeObserver:class{observe(){}},Image:class{complete=true;naturalWidth=1920;set src(v){queueMicrotask(()=>this.onload())}},fetch:async(route,options)=>{if(!options)return {ok:true,json:async()=>state};const body=JSON.parse(options.body);calls.push(body);return {ok:true,json:async()=>({label:{status:body.status,objects:body.objects}})}},queueMicrotask,confirm:()=>true});
 const html=fs.readFileSync('src/video_annotating_interface/static/index.html','utf8');vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
@@ -32,5 +32,11 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  assert.equal(calls.at(-1).objects[1].x,200,'other ball preserved');
  await vm.runInContext("addObject({type:'box',x:105,y:100,width:10,height:10})",context);await tick();
  assert.equal(calls.at(-1).objects.length,3,'box remains a separate object');
+ async function press(code,key) { documentListeners.keydown({code,key,shiftKey:false,preventDefault(){}});await tick();await tick(); }
+ await press('KeyD','d');assert.equal(vm.runInContext('frame',context),1);
+ await press('KeyA','a');assert.equal(vm.runInContext('frame',context),0);
+ element('step').value='2';
+ await press('KeyS','s');assert.equal(vm.runInContext('frame',context),2);
+ await press('KeyW','w');assert.equal(vm.runInContext('frame',context),0);
  console.log('UI behavior checks passed');
 })().catch(error=>{console.error(error);process.exitCode=1});

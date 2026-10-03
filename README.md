@@ -37,7 +37,7 @@ The same video and output path resume earlier work. The application checks the v
 - Suggestions appear in cyan and are saved when you leave the frame. Left click replaces the nearest point within 12 screen pixels (at most 24 original-video pixels), or adds a new point outside that radius. Other points and boxes are preserved. Right click near an object removes it. The wheel zooms around the cursor inside a fixed viewport; the zoom is preserved across frames.
 - The range tool marks many frames absent after showing how many existing labels it will replace.
 
-The interface saves after each edit and reports save failures. For key bindings, see the panel inside the application.
+The interface saves after each edit and reports save failures. A/D move one frame backward/forward; W/S move by the configured Step. Arrow keys provide the same navigation. X marks absence and C accepts suggestions. For other key bindings, see the panel inside the application.
 
 ## Files
 
