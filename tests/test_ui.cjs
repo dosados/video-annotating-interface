@@ -5,7 +5,7 @@ function element(id) {
  return elements.get(id);
 }
 const state={video:{name:'test',width:1920,height:1080,frame_count:5},fps:60,frames:{},suggestions:{'0':[{type:'point',x:100,y:100}],'1':[{type:'point',x:200,y:200}]}};
-const context=vm.createContext({console,Math,Number,Object,String,Array,Error,document:{getElementById:element,createElement:()=>element(Math.random()),addEventListener(name,fn){documentListeners[name]=fn},activeElement:{tagName:'BODY'}},window:{},ResizeObserver:class{observe(){}},Image:class{complete=true;naturalWidth=1920;set src(v){queueMicrotask(()=>this.onload())}},fetch:async(route,options)=>{if(!options)return {ok:true,json:async()=>state};const body=JSON.parse(options.body);calls.push(body);return {ok:true,json:async()=>({label:{status:body.status,objects:body.objects}})}},queueMicrotask,confirm:()=>true});
+const context=vm.createContext({console,Math,Number,Object,String,Array,Error,document:{getElementById:element,createElement:()=>element(Math.random()),addEventListener(name,fn){documentListeners[name]=fn},activeElement:{tagName:'BODY'}},window:{addEventListener(){}},ResizeObserver:class{observe(){}},Image:class{complete=true;naturalWidth=1920;set src(v){queueMicrotask(()=>this.onload())}},fetch:async(route,options)=>{if(!options)return {ok:true,json:async()=>state};const body=JSON.parse(options.body);calls.push(body);return {ok:true,json:async()=>({label:{status:body.status,objects:body.objects}})}},queueMicrotask,confirm:()=>true});
 const html=fs.readFileSync('src/video_annotating_interface/static/index.html','utf8');vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
@@ -45,5 +45,19 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  assert.equal(calls.at(-1).objects[1].x,200,'other ball preserved');
  await vm.runInContext("addObject({type:'point',x:260,y:100})",context);await tick();
  assert.equal(calls.at(-1).objects.length,4,'outside radius adds a distinct point');
+ const savedBeforePan=calls.length, beforePan=vm.runInContext('[offsetX,offsetY]',context);
+ documentListeners.keydown({code:'Space',key:' ',preventDefault(){}});
+ element('canvas').listeners.pointerdown({button:0,clientX:100,clientY:100,pointerId:1});
+ element('canvas').listeners.pointermove({clientX:160,clientY:145});
+ const afterPan=vm.runInContext('[offsetX,offsetY]',context);
+ assert.equal(afterPan[0]-beforePan[0],60);assert.equal(afterPan[1]-beforePan[1],45);
+ documentListeners.keyup({code:'Space',preventDefault(){}});
+ element('canvas').listeners.pointerup({button:0,clientX:160,clientY:145});
+ await tick();assert.equal(calls.length,savedBeforePan,'pan must not write an annotation even if Space is released first');
+ await vm.runInContext('go(1)',context);await tick();
+ assert.equal(vm.runInContext('offsetX',context),afterPan[0],'pan retained between frames');
+ const click=vm.runInContext('({clientX:offsetX+200*viewScale,clientY:offsetY+200*viewScale})',context);
+ element('canvas').listeners.pointerup({button:0,...click});await tick();
+ assert.equal(calls.length,savedBeforePan+2,'annotation works after hand release');
  console.log('UI behavior checks passed');
 })().catch(error=>{console.error(error);process.exitCode=1});
