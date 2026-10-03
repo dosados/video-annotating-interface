@@ -29,7 +29,7 @@ A plain array of per-frame points is also accepted. Extra fields such as `confid
 ]
 ```
 
-Suggestions are displayed but never copied into output automatically. Each object must fit inside the frame. A point has exactly `type`, `x`, and `y`; a box has exactly `type`, `x`, `y`, `width`, and `height`. Box width and height must be positive. At most 100 objects can be saved on one frame.
+When you leave a displayed frame, its current objects are saved to output, including unchanged suggestions. Removing all objects records absence. Frames that have never been visited remain unreviewed. Each object must fit inside the frame. A point has exactly `type`, `x`, and `y`; a box has exactly `type`, `x`, `y`, `width`, and `height`. Box width and height must be positive. At most 100 objects can be saved on one frame.
 
 ## Output annotations
 

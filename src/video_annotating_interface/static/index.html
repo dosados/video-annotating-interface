@@ -7,7 +7,7 @@
   <style>
     :root { font-family: system-ui, sans-serif; color-scheme: dark; color: #eaf0f5; background: #101820; }
     * { box-sizing: border-box; }
-    body { margin: 0; }
+    body { margin: 0; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; }
     button, input, select { font: inherit; color: inherit; background: #223443; border: 1px solid #567084; border-radius: 6px; padding: 7px 9px; }
     button { cursor: pointer; }
     button:hover { background: #315269; }
@@ -17,16 +17,16 @@
     h1 { font-size: 20px; margin: 0; }
     h2 { font-size: 16px; margin: 18px 0 8px; }
     .muted { color: #aabcc8; font-size: 13px; }
-    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; min-height: calc(100vh - 68px); }
-    main { padding: 14px; min-width: 0; }
-    aside { border-left: 1px solid #384c5b; padding: 14px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; flex: 1; min-height: 0; }
+    main { padding: 14px; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    aside { border-left: 1px solid #384c5b; padding: 14px; overflow: auto; }
     .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
     .row label { display: inline-flex; align-items: center; gap: 5px; }
     input[type="number"] { width: 87px; }
     input[type="range"] { flex: 1; min-width: 120px; padding: 0; }
     input[type="checkbox"] { width: auto; }
-    .viewer { height: min(68vh, 850px); overflow: auto; background: #02070c; border: 1px solid #384c5b; border-radius: 8px; }
-    canvas { display: block; max-width: none; cursor: crosshair; }
+    .viewer { flex: 1; min-height: 100px; overflow: hidden; position: relative; background: #02070c; border: 1px solid #384c5b; border-radius: 8px; }
+    canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
     .message { min-height: 22px; color: #8bdcbf; }
     .message.error { color: #ffb18e; }
     .panel { border-top: 1px solid #384c5b; padding-top: 10px; margin-top: 14px; }
@@ -38,7 +38,7 @@
     .wide { width: 100%; margin-top: 8px; }
     .keys { line-height: 1.7; font-size: 13px; color: #b6c8d4; }
     kbd { border: 1px solid #526879; border-radius: 4px; padding: 1px 4px; color: #eaf0f5; }
-    @media (max-width: 900px) { .layout { display: block; } aside { border-left: 0; border-top: 1px solid #384c5b; } .viewer { height: 55vh; } }
+    @media (max-width: 900px) { .layout { grid-template-columns: minmax(0, 1fr); } aside { display: none; } }
   </style>
 </head>
 <body>
@@ -55,7 +55,7 @@
       <div class="viewer" id="viewer"><canvas id="canvas"></canvas></div>
       <div class="row" style="margin-top:10px">
         <button id="point" class="active">Point (P)</button><button id="box">Box (B)</button>
-        <button id="accept">Accept suggestions (S)</button><button id="absent">Absent (A)</button><button id="clear">Clear frame</button>
+        <button id="accept">Accept suggestions (S)</button><button id="absent">Absent (A)</button><button id="clear">Remove all</button>
         <label><input id="show-suggestions" type="checkbox" checked> Suggestions</label>
         <label>Zoom <input id="zoom" type="range" min="1" max="4" step="0.25" value="1"></label><span id="zoom-value">1×</span>
       </div>
@@ -84,7 +84,7 @@
         <kbd>P</kbd> point · <kbd>B</kbd> box · <kbd>S</kbd> accept suggestions · <kbd>A</kbd> absent · <kbd>N</kbd> next unreviewed<br>
         <kbd>Enter</kbd> next frame · <kbd>Delete</kbd> clear frame
       </div>
-      <p class="muted">Every change is saved immediately. Reopen the same video and output file to continue. Suggestions are shown in cyan and are never saved as labels automatically.</p>
+      <p class="muted">Every change is saved immediately. Reopen the same video and output file to continue. Suggestions are shown in cyan. Leaving a frame saves its current objects, including unchanged suggestions. Left click adds a point; right click removes a nearby object; the wheel zooms around the cursor.</p>
     </aside>
   </div>
   <script>
@@ -93,12 +93,14 @@
     const canvas = $('canvas'), ctx = canvas.getContext('2d');
     let state, frame = 0, image = new Image(), requestId = 0, mode = 'point', drag = null, busy = false, frameReady = false;
     function notice(text, error = false) { $('message').textContent = text; $('message').classList.toggle('error', error); }
-    function current() { return state.frames[String(frame)]; }
+    let zoom = 1, offsetX = 0, offsetY = 0, viewScale = 1, navigating = false;
+    function current() { return state.frames[String(frame)] || {status: (state.suggestions[String(frame)] || []).length ? 'annotated' : 'absent', objects: state.suggestions[String(frame)] || []}; }
     function coords(event) {
       const r = canvas.getBoundingClientRect();
-      return { x: Math.max(0, Math.min(state.video.width - 0.01, (event.clientX-r.left)*state.video.width/r.width)),
-               y: Math.max(0, Math.min(state.video.height - 0.01, (event.clientY-r.top)*state.video.height/r.height)) };
+      return {x:(event.clientX-r.left-offsetX)/viewScale,
+              y:(event.clientY-r.top-offsetY)/viewScale};
     }
+    function inside(p) { return p.x >= 0 && p.y >= 0 && p.x < state.video.width && p.y < state.video.height; }
     function modeSet(value) {
       mode = value;
       for (const name of ['point', 'box']) $(name).classList.toggle('active', name === mode);
@@ -108,26 +110,41 @@
     }
     function resize() {
       if (!state) return;
-      const zoom = Number($('zoom').value), base = Math.min(state.video.width, Math.max(200, $('viewer').clientWidth - 2));
-      $('zoom-value').textContent = `${zoom}×`;
-      canvas.style.width = `${Math.round(base*zoom)}px`;
-      canvas.style.height = `${Math.round(base*zoom*state.video.height/state.video.width)}px`;
+      const oldScale = viewScale;
+      const centerX = (canvas.width/2-offsetX)/oldScale, centerY = (canvas.height/2-offsetY)/oldScale;
+      canvas.width = $('viewer').clientWidth; canvas.height = $('viewer').clientHeight;
+      viewScale = Math.min(canvas.width/state.video.width, canvas.height/state.video.height)*zoom;
+      if (zoom === 1) { offsetX=(canvas.width-state.video.width*viewScale)/2; offsetY=(canvas.height-state.video.height*viewScale)/2; }
+      else { offsetX=canvas.width/2-centerX*viewScale; offsetY=canvas.height/2-centerY*viewScale; }
       draw();
     }
+    function zoomAt(next, x, y) {
+      const px=(x-offsetX)/viewScale, py=(y-offsetY)/viewScale;
+      zoom=Math.max(1,Math.min(12,next));
+      viewScale=Math.min(canvas.width/state.video.width,canvas.height/state.video.height)*zoom;
+      offsetX=x-px*viewScale; offsetY=y-py*viewScale;
+      if (zoom===1) { offsetX=(canvas.width-state.video.width*viewScale)/2; offsetY=(canvas.height-state.video.height*viewScale)/2; }
+      $('zoom-value').textContent=`${zoom.toFixed(2)}×`; $('zoom').value=Math.min(4,zoom); draw();
+    }
+    canvas.addEventListener('wheel', event => {
+      event.preventDefault(); const r=canvas.getBoundingClientRect();
+      zoomAt(zoom*Math.exp(-event.deltaY*0.002),event.clientX-r.left,event.clientY-r.top);
+    }, {passive:false});
     function drawObject(obj, color, dashed = false) {
-      ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.setLineDash(dashed ? [9, 5] : []);
+      ctx.strokeStyle = color; ctx.lineWidth = 2/viewScale; ctx.setLineDash(dashed ? [9, 5] : []);
       if (obj.type === 'point') {
-        ctx.beginPath(); ctx.arc(obj.x, obj.y, 11, 0, Math.PI*2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(obj.x, obj.y, 7/viewScale, 0, Math.PI*2); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(obj.x-17,obj.y); ctx.lineTo(obj.x+17,obj.y); ctx.moveTo(obj.x,obj.y-17); ctx.lineTo(obj.x,obj.y+17); ctx.stroke();
       } else ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
       ctx.setLineDash([]);
     }
     function draw() {
       if (!state || !frameReady || !image.complete || !image.naturalWidth) return;
-      canvas.width = state.video.width; canvas.height = state.video.height;
-      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-      if ($('show-suggestions').checked) for (const obj of (state.suggestions[String(frame)] || [])) drawObject(obj, '#48d8ff', true);
-      for (const obj of (current()?.objects || [])) drawObject(obj, '#ffdb66');
+      ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.setTransform(viewScale,0,0,viewScale,offsetX,offsetY);
+      ctx.drawImage(image, 0, 0, state.video.width, state.video.height);
+      if (!state.frames[String(frame)] && $('show-suggestions').checked) for (const obj of (state.suggestions[String(frame)] || [])) drawObject(obj, '#48d8ff', true);
+      if (state.frames[String(frame)]) for (const obj of current().objects) drawObject(obj, '#ffdb66');
       if (drag) {
         const x = Math.min(drag.start.x, drag.end.x), y = Math.min(drag.start.y, drag.end.y);
         drawObject({type:'box',x,y,width:Math.abs(drag.start.x-drag.end.x),height:Math.abs(drag.start.y-drag.end.y)}, '#92edba');
@@ -150,11 +167,20 @@
       const suggested = state.suggestions[String(frame)]?.length || 0;
       if (suggested) { const info = document.createElement('p'); info.className = 'muted'; info.textContent = `${suggested} suggestion(s) in cyan`; list.append(info); }
     }
-    function go(index) {
-      if (!state) return;
+    async function go(index) {
+      if (!state || navigating) return;
+      index = Math.max(0, Math.min(state.video.frame_count-1, Math.round(index)));
+      if (frameReady) {
+        navigating=true;
+        const label=current(), at=frame;
+        const result=await post('/api/frame',{frame:at,...label});
+        navigating=false;
+        if (!result) return;
+        state.frames[String(at)]=result.label;
+      }
       frame = Math.max(0, Math.min(state.video.frame_count - 1, Math.round(index)));
       drag = null; frameReady = false; update();
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0, 0, canvas.width, canvas.height);
       const sequence = ++requestId, incoming = new Image();
       incoming.onload = () => { if (sequence !== requestId) return; image = incoming; frameReady = true; draw(); notice(''); };
       incoming.onerror = () => { if (sequence === requestId) notice(`Cannot load frame ${frame}`, true); };
@@ -186,19 +212,16 @@
     function addObject(obj) { setLabel('annotated', [...(current()?.objects || []), obj]); }
     function removeObject(index) {
       const objects = [...(current()?.objects || [])]; objects.splice(index, 1);
-      if (objects.length) setLabel('annotated', objects); else clearFrame();
+      if (objects.length) setLabel('annotated', objects); else setLabel('absent', []);
     }
-    async function clearFrame() {
-      const at = frame, result = await post('/api/clear', {frame:at});
-      if (result) { delete state.frames[String(at)]; update(); draw(); notice(`Frame ${at} cleared`); }
-    }
+    function clearFrame() { setLabel('absent', []); }
     canvas.addEventListener('pointerdown', event => {
-      if (!frameReady) return;
+      if (!frameReady || event.button !== 0 || !inside(coords(event))) return;
       if (mode === 'box') { drag = {start:coords(event),end:coords(event)}; canvas.setPointerCapture(event.pointerId); draw(); }
     });
     canvas.addEventListener('pointermove', event => { if (drag) { drag.end = coords(event); draw(); } });
     canvas.addEventListener('pointerup', event => {
-      if (!frameReady) return;
+      if (!frameReady || event.button !== 0 || !inside(coords(event))) { drag=null; return; }
       if (mode === 'point') { const p = coords(event); addObject({type:'point',x:p.x,y:p.y}); return; }
       if (!drag) return;
       drag.end = coords(event);
@@ -207,6 +230,16 @@
       drag = null; draw();
       if (width >= 2 && height >= 2) addObject({type:'box',x,y,width,height});
       else notice('Drag at least 2 pixels in both directions for a box', true);
+    });
+    canvas.addEventListener('contextmenu', event => {
+      event.preventDefault(); if (!frameReady) return;
+      const p=coords(event), objects=current().objects;
+      let best=-1, distance=18/viewScale;
+      objects.forEach((obj,i)=>{
+        const d=obj.type==='point' ? Math.hypot(p.x-obj.x,p.y-obj.y) : Math.hypot(Math.max(obj.x-p.x,0,p.x-obj.x-obj.width),Math.max(obj.y-p.y,0,p.y-obj.y-obj.height));
+        if (d<=distance) {distance=d;best=i;}
+      });
+      if (best>=0) removeObject(best);
     });
     $('add-coordinates').onclick = () => {
       const x = Number($('x').value), y = Number($('y').value);
@@ -227,7 +260,7 @@
     $('previous').onclick = () => go(frame-Number($('step').value)); $('next').onclick = () => go(frame+Number($('step').value));
     $('previous-open').onclick = () => unreviewed(-1); $('next-open').onclick = () => unreviewed(1);
     $('frame').onchange = () => go(Number($('frame').value)); $('timeline').oninput = () => go(Number($('timeline').value));
-    $('zoom').oninput = resize; $('show-suggestions').onchange = draw; window.addEventListener('resize', resize);
+    $('zoom').oninput = () => zoomAt(Number($('zoom').value),canvas.width/2,canvas.height/2); $('show-suggestions').onchange = draw; new ResizeObserver(resize).observe($('viewer'));
     $('mark-range').onclick = async () => {
       const start = Number($('range-start').value), end = Number($('range-end').value);
       if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || end-start > 10000) return notice('Invalid range (maximum 10001 frames)', true);

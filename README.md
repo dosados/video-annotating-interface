@@ -32,9 +32,9 @@ The same video and output path resume earlier work. The application checks the v
 
 - Choose **Point** and click a frame, or choose **Box** and drag its corners. You can add multiple objects per frame.
 - Enter exact coordinates in the right panel when needed. Coordinates use the original video's pixel grid.
-- Choose **Absent** when the target object is not visible. **Clear frame** returns a frame to unreviewed.
+- Choose **Absent** when the target object is not visible. **Remove all** removes all objects and records absence.
 - Use the frame buttons, timeline, frame number, or arrow keys to move through the video. Zoom helps with small objects.
-- Suggestions appear in cyan. Check the frame, then use **Accept suggestions** to copy them into the reviewed labels.
+- Suggestions appear in cyan and are saved when you leave the frame. Left click adds a point; right click near an object removes it. The wheel zooms around the cursor inside a fixed viewport; the zoom is preserved across frames.
 - The range tool marks many frames absent after showing how many existing labels it will replace.
 
 The interface saves after each edit and reports save failures. For key bindings, see the panel inside the application.
