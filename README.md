@@ -2,6 +2,18 @@
 
 A local browser interface for marking points, boxes, and absent objects in video frames. It does not require an account or upload videos. It saves each change to a JSON file on your computer.
 
+## Download
+
+**[Download the latest release](https://github.com/dosados/video-annotating-interface/releases/latest)**
+
+| System | Download | Launch after extracting |
+|---|---|---|
+| Windows x64 | [ZIP](https://github.com/dosados/video-annotating-interface/releases/latest/download/video-annotating-interface-windows-x86_64.zip) | `video-annotating-interface.exe` |
+| Linux x64 | [TAR.GZ](https://github.com/dosados/video-annotating-interface/releases/latest/download/video-annotating-interface-linux-x86_64.tar.gz) | `video-annotating-interface` |
+| macOS Apple Silicon | [TAR.GZ](https://github.com/dosados/video-annotating-interface/releases/latest/download/video-annotating-interface-macos-arm64.tar.gz) | `Open.command` |
+
+Python is included. Select the video, optional suggestions and output JSON in the browser. Select an existing output to resume. Keep the console open while annotating.
+
 ## Install and run
 
 Python 3.10 or newer is required. From this directory:
@@ -65,3 +77,5 @@ Build Linux, Windows, and macOS separately on each target OS. The interface uses
 The macOS build targets Apple Silicon; Intel Macs need a separate x86_64 build. These builds are unsigned. Windows/macOS may require the user to explicitly allow launching a downloaded application. Linux builds require compatible system libraries; the CI build uses Ubuntu 22.04. No installer or Python setup is required on the user's computer.
 
 Run `python scripts/smoke_executable.py` after building to verify bundled file selection, video decoding, saving and resume without opening a browser. Package locally with `python scripts/package.py --target linux-x86_64` (or the matching Windows/macOS target).
+
+Version tags (`v*`) publish a release automatically after all three builds and tests pass.
