@@ -57,3 +57,11 @@ make build
 Without Make: `python -m PyInstaller --clean --noconfirm video-annotating-interface.spec`. Find the executable in `dist/` (`.exe` on Windows). Launch it and select local files in the browser. Keep its console open during annotation; stop with Ctrl+C. Closing the browser does not stop the server. Inputs and outputs remain external files. The default output directory is `~/Documents/VideoAnnotations/output/`.
 
 Build Linux, Windows, and macOS separately on each target OS. The interface uses the installed browser.
+
+### Three platform builds
+
+`.github/workflows/build.yml` builds and tests Linux x86_64, Windows x86_64 and macOS Apple Silicon (arm64) on their respective runners. Push to `main`, or open **Actions → Build applications → Run workflow**. Download the matching archive from the run's **Artifacts**, then extract it. Windows starts with the `.exe`; macOS with `Open.command`; Linux with `video-annotating-interface`. Each archive includes a SHA-256 checksum. Artifacts are retained for 30 days.
+
+The macOS build targets Apple Silicon; Intel Macs need a separate x86_64 build. These builds are unsigned. Windows/macOS may require the user to explicitly allow launching a downloaded application. Linux builds require compatible system libraries; the CI build uses Ubuntu 22.04. No installer or Python setup is required on the user's computer.
+
+Run `python scripts/smoke_executable.py` after building to verify bundled file selection, video decoding, saving and resume without opening a browser. Package locally with `python scripts/package.py --target linux-x86_64` (or the matching Windows/macOS target).
