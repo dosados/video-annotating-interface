@@ -9,3 +9,5 @@ input/*
 !input/.gitkeep
 output/*
 !output/.gitkeep
+dist/
+.build-venv/

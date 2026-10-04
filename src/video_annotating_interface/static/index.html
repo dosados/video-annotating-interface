@@ -75,9 +75,10 @@
         <p class="muted">Point mode: click the video. Box mode: drag from one corner to the opposite corner. You can add several objects to one frame.</p>
       </div>
       <div class="panel">
-        <h2>Mark a range absent</h2>
+        <h2>Frames with no visible object</h2>
+        <p class="muted">Marks every frame in the range as having no visible target object. Existing labels in that range are replaced.</p>
         <div class="row"><input id="range-start" type="number" min="0" value="0"><span>to</span><input id="range-end" type="number" min="0" value="0"></div>
-        <button id="mark-range" class="wide">Mark range absent</button>
+        <button id="mark-range" class="wide">Mark these frames absent</button>
       </div>
       <div class="panel keys"><h2>Keyboard</h2>
         <kbd>A</kbd>/<kbd>D</kbd> or <kbd>←</kbd>/<kbd>→</kbd> one frame · <kbd>W</kbd>/<kbd>S</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd> uses Step<br>
@@ -319,7 +320,7 @@
       .then(result => { state = result; $('source').textContent = `${state.video.name} · ${state.video.width}×${state.video.height} · ${state.fps.toFixed(2)} fps`;
         $('timeline').max = state.video.frame_count-1; $('frame').max = state.video.frame_count-1;
         $('range-start').max = state.video.frame_count-1; $('range-end').max = state.video.frame_count-1;
-        modeSet('point'); resize(); go(0); })
+        modeSet('point'); resize(); go(result.resume_frame ?? 0); })
       .catch(error => notice(`Cannot load project: ${error.message}`, true));
   </script>
 </body>

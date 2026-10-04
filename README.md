@@ -15,7 +15,7 @@ python run.py input/my-video.mp4
 
 On Windows, activate the environment with `.venv\Scripts\activate` and use `python run.py input\my-video.mp4`.
 
-The browser opens at `http://127.0.0.1:8766/`. Stop the server with `Ctrl+C`. If `input/` contains exactly one video, `python run.py` is enough. By default, labels go to `output/<video-name>.annotations.json`.
+The browser opens at `http://127.0.0.1:8766/`. Stop the server with `Ctrl+C`. `python run.py` opens a file selection screen for the video, optional suggestions, and output JSON. Choose an existing output to resume, or a new file to start. By default, labels go to `output/<video-name>.annotations.json`.
 
 Options:
 
@@ -26,7 +26,7 @@ python run.py path/to/video.mp4 \
   --port 8766
 ```
 
-The same video and output path resume earlier work. The application checks the video's name, byte size, dimensions, and frame count before loading existing labels.
+The same video and output path resume earlier work at the last saved frame. Older files resume at the highest saved frame. The application checks the video's name, byte size, dimensions, and frame count before loading existing labels.
 
 ## Annotate
 
@@ -44,3 +44,16 @@ The interface saves after each edit and reports save failures. A/D move one fram
 `input/` is a convenient place for videos and optional suggestion JSON. `output/` is the default location for annotation JSON. Both folders ignore user files in Git. The exact formats, validation rules, and examples are in [docs/formats.md](docs/formats.md).
 
 The server listens only on `127.0.0.1`. It is designed for one local user and does not expose an authenticated remote service.
+
+## Build an executable
+
+Build on the target operating system. Python is bundled in the executable.
+
+```bash
+pip install -e ".[build]"
+make build
+```
+
+Without Make: `python -m PyInstaller --clean --noconfirm video-annotating-interface.spec`. Find the executable in `dist/` (`.exe` on Windows). Launch it and select local files in the browser. Keep its console open during annotation; stop with Ctrl+C. Closing the browser does not stop the server. Inputs and outputs remain external files. The default output directory is `~/Documents/VideoAnnotations/output/`.
+
+Build Linux, Windows, and macOS separately on each target OS. The interface uses the installed browser.
