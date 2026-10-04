@@ -1,81 +1,63 @@
 # Video Annotating Interface
 
-A local browser interface for marking points, boxes, and absent objects in video frames. It does not require an account or upload videos. It saves each change to a JSON file on your computer.
+Annotate points, boxes, and object absence in video frames. Runs locally in your browser, with automatic saving and optional model suggestions. No account or video uploads.
 
-## Download
+## Download and run
 
-**[Download the latest release](https://github.com/dosados/video-annotating-interface/releases/latest)**
+Download the archive for your system, extract it, and launch:
 
-| System | Download | Launch after extracting |
+| System | Download | Launch |
 |---|---|---|
 | Windows x64 | [ZIP](https://github.com/dosados/video-annotating-interface/releases/latest/download/video-annotating-interface-windows-x86_64.zip) | `video-annotating-interface.exe` |
 | Linux x64 | [TAR.GZ](https://github.com/dosados/video-annotating-interface/releases/latest/download/video-annotating-interface-linux-x86_64.tar.gz) | `video-annotating-interface` |
 | macOS Apple Silicon | [TAR.GZ](https://github.com/dosados/video-annotating-interface/releases/latest/download/video-annotating-interface-macos-arm64.tar.gz) | `Open.command` |
 
-Python is included. Select the video, optional suggestions and output JSON in the browser. Select an existing output to resume. Keep the console open while annotating.
+Python installation is not required. [All releases](https://github.com/dosados/video-annotating-interface/releases). Builds are unsigned; your OS may ask you to allow opening the application.
 
-## Install and run
+In the browser, select:
 
-Python 3.10 or newer is required. From this directory:
+1. **Video** — the video to annotate.
+2. **Suggestions JSON** — optional preliminary labels.
+3. **Output annotations JSON** — a new file, or an existing result to resume.
+
+Click **Open annotation**. Keep the console open while working. Stop the application with `Ctrl+C` in the console.
+
+## Annotate
+
+| Action | Control |
+|---|---|
+| Add a point or move a nearby point | Left click in **Point** mode |
+| Remove an object | Right click near it |
+| Draw a box | Select **Box**, then drag |
+| Previous / next frame | `A` / `D` or `←` / `→` |
+| Move by the configured Step | `W` / `S` or `↑` / `↓` |
+| Zoom around the cursor | Mouse wheel |
+| Pan the zoomed image | Hold `Space` and drag |
+| Mark object absence | **Absent** or `X` |
+
+Multiple objects can be marked on each frame. Exact coordinates can be entered in the side panel. Zoom and pan persist across frames.
+
+The absence range tool marks every frame in the selected range as absent, replacing existing labels there.
+
+## Save and resume
+
+Edits save automatically to the selected output JSON. Unchanged suggestions are saved when you move to another frame. No Save button is needed; check for save errors before closing.
+
+To continue later, open the same video and output file. The interface restores the last saved frame. Input suggestions are never overwritten.
+
+[Input and output formats](docs/formats.md)
+
+## Run from source
+
+Requires Python 3.10+:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
-python run.py input/my-video.mp4
+python run.py
 ```
 
-On Windows, activate the environment with `.venv\Scripts\activate` and use `python run.py input\my-video.mp4`.
+On Windows, activate with `.venv\Scripts\activate`. The browser opens at `http://127.0.0.1:8766/`.
 
-The browser opens at `http://127.0.0.1:8766/`. Stop the server with `Ctrl+C`. `python run.py` opens a file selection screen for the video, optional suggestions, and output JSON. Choose an existing output to resume, or a new file to start. By default, labels go to `output/<video-name>.annotations.json`.
-
-Options:
-
-```bash
-python run.py path/to/video.mp4 \
-  --suggestions input/suggestions.json \
-  --output output/labels.json \
-  --port 8766
-```
-
-The same video and output path resume earlier work at the last saved frame. Older files resume at the highest saved frame. The application checks the video's name, byte size, dimensions, and frame count before loading existing labels.
-
-## Annotate
-
-- Choose **Point** and click a frame, or choose **Box** and drag its corners. You can add multiple objects per frame.
-- Enter exact coordinates in the right panel when needed. Coordinates use the original video's pixel grid.
-- Choose **Absent** when the target object is not visible. **Remove all** removes all objects and records absence.
-- Use the frame buttons, timeline, frame number, or arrow keys to move through the video. Zoom helps with small objects.
-- Suggestions appear in cyan and are saved when you leave the frame. Left click replaces the nearest point within 40 original-video pixels, independent of zoom, or adds a new point outside that radius. Other points and boxes are preserved. Right click near an object removes it. The wheel zooms around the cursor inside a fixed viewport. Hold Space and drag with the left mouse button to pan the image. Release Space to annotate again. Zoom and pan are preserved across frames.
-- The range tool marks many frames absent after showing how many existing labels it will replace.
-
-The interface saves after each edit and reports save failures. A/D move one frame backward/forward; W/S move by the configured Step. Arrow keys provide the same navigation. X marks absence and C accepts suggestions. For other key bindings, see the panel inside the application.
-
-## Files
-
-`input/` is a convenient place for videos and optional suggestion JSON. `output/` is the default location for annotation JSON. Both folders ignore user files in Git. The exact formats, validation rules, and examples are in [docs/formats.md](docs/formats.md).
-
-The server listens only on `127.0.0.1`. It is designed for one local user and does not expose an authenticated remote service.
-
-## Build an executable
-
-Build on the target operating system. Python is bundled in the executable.
-
-```bash
-pip install -e ".[build]"
-make build
-```
-
-Without Make: `python -m PyInstaller --clean --noconfirm video-annotating-interface.spec`. Find the executable in `dist/` (`.exe` on Windows). Launch it and select local files in the browser. Keep its console open during annotation; stop with Ctrl+C. Closing the browser does not stop the server. Inputs and outputs remain external files. The default output directory is `~/Documents/VideoAnnotations/output/`.
-
-Build Linux, Windows, and macOS separately on each target OS. The interface uses the installed browser.
-
-### Three platform builds
-
-`.github/workflows/build.yml` builds and tests Linux x86_64, Windows x86_64 and macOS Apple Silicon (arm64) on their respective runners. Push to `main`, or open **Actions → Build applications → Run workflow**. Download the matching archive from the run's **Artifacts**, then extract it. Windows starts with the `.exe`; macOS with `Open.command`; Linux with `video-annotating-interface`. Each archive includes a SHA-256 checksum. Artifacts are retained for 30 days.
-
-The macOS build targets Apple Silicon; Intel Macs need a separate x86_64 build. These builds are unsigned. Windows/macOS may require the user to explicitly allow launching a downloaded application. Linux builds require compatible system libraries; the CI build uses Ubuntu 22.04. No installer or Python setup is required on the user's computer.
-
-Run `python scripts/smoke_executable.py` after building to verify bundled file selection, video decoding, saving and resume without opening a browser. Package locally with `python scripts/package.py --target linux-x86_64` (or the matching Windows/macOS target).
-
-Version tags (`v*`) publish a release automatically after all three builds and tests pass.
+[Build instructions](docs/build.md)
