@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -74,21 +75,29 @@ class AnnotationStore:
         self.lock = threading.RLock()
         self.next_frame = -1
         self.labels: dict[str, dict] = {}
-        if self.output.exists():
-            saved = json.loads(self.output.read_text(encoding="utf-8"))
-            if saved.get("format") != FORMAT or saved.get("video") != self.identity:
-                raise ValueError("Output file has a different format or video identity")
-            if not isinstance(saved.get("frames"), dict):
-                raise ValueError("Output frames must be an object")
-            for key, label in saved["frames"].items():
-                frame = self._frame(int(key))
-                if key != str(frame):
-                    raise ValueError("Frame keys must be canonical integer strings")
-                self.labels[key] = self._label(label.get("status"), label.get("objects"))
-        self.last_annotated_frame = max(map(int, self.labels), default=0)
-        if self.output.exists() and "last_annotated_frame" in saved:
-            self.last_annotated_frame = self._frame(saved["last_annotated_frame"])
-        self.suggestions = self._read_suggestions(suggestions) if suggestions else {}
+        try:
+            if self.output.exists():
+                saved = json.loads(self.output.read_text(encoding="utf-8"))
+                if not isinstance(saved, dict):
+                    raise TypeError("Output must be a JSON object")
+                if saved.get("format") != FORMAT or saved.get("video") != self.identity:
+                    raise ValueError("Output file has a different format or video identity")
+                if not isinstance(saved.get("frames"), dict):
+                    raise ValueError("Output frames must be an object")
+                for key, label in saved["frames"].items():
+                    if not isinstance(label, dict):
+                        raise TypeError("Frame label must be a JSON object")
+                    frame = self._frame(int(key))
+                    if key != str(frame):
+                        raise ValueError("Frame keys must be canonical integer strings")
+                    self.labels[key] = self._label(label.get("status"), label.get("objects"))
+            self.last_annotated_frame = max(map(int, self.labels), default=0)
+            if self.output.exists() and "last_annotated_frame" in saved:
+                self.last_annotated_frame = self._frame(saved["last_annotated_frame"])
+            self.suggestions = self._read_suggestions(suggestions) if suggestions else {}
+        except Exception:
+            self.close()
+            raise
 
     def _frame(self, frame: object) -> int:
         if isinstance(frame, bool) or not isinstance(frame, int) or not 0 <= frame < self.count:
@@ -184,17 +193,35 @@ class AnnotationStore:
         key = str(self._frame(frame))
         label = self._label(status, objects)
         with self.lock:
+            previous = self.labels.get(key)
+            previous_frame = self.last_annotated_frame
             self.labels[key] = label
             self.last_annotated_frame = frame
-            self._write()
+            try:
+                self._write()
+            except OSError:
+                if previous is None:
+                    self.labels.pop(key, None)
+                else:
+                    self.labels[key] = previous
+                self.last_annotated_frame = previous_frame
+                raise
         return label
 
     def clear_frame(self, frame: int) -> None:
         key = str(self._frame(frame))
         with self.lock:
+            previous = self.labels.get(key)
+            previous_frame = self.last_annotated_frame
             self.labels.pop(key, None)
             self.last_annotated_frame = max(map(int, self.labels), default=0)
-            self._write()
+            try:
+                self._write()
+            except OSError:
+                if previous is not None:
+                    self.labels[key] = previous
+                self.last_annotated_frame = previous_frame
+                raise
 
     def set_absent_range(self, start: int, end: int) -> int:
         self._frame(start)
@@ -202,10 +229,17 @@ class AnnotationStore:
         if end < start or end - start > 10000:
             raise ValueError("Range must contain 1–10001 frames")
         with self.lock:
+            previous = dict(self.labels)
+            previous_frame = self.last_annotated_frame
             for frame in range(start, end + 1):
                 self.labels[str(frame)] = {"status": "absent", "objects": []}
             self.last_annotated_frame = end
-            self._write()
+            try:
+                self._write()
+            except OSError:
+                self.labels = previous
+                self.last_annotated_frame = previous_frame
+                raise
         return end - start + 1
 
     def close(self) -> None:
@@ -238,14 +272,202 @@ def open_store(video: str, output: str, suggestions: str | None = None) -> Annot
     if destination.suffix.lower() != ".json":
         raise ValueError("Output filename must end in .json")
     inputs = [source.resolve()] + ([suggestion_path.resolve()] if suggestion_path else [])
-    if destination.resolve() in inputs:
-        raise ValueError("Output must differ from the input files")
+    if (
+        destination.resolve() in inputs
+        or destination.with_name(destination.name + ".tmp").resolve() in inputs
+    ):
+        raise ValueError("Output and temporary file must differ from the input files")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not os.access(destination.parent, os.W_OK) or (
         destination.exists() and not os.access(destination, os.W_OK)
     ):
         raise ValueError("Output location is not writable")
     return AnnotationStore(source, destination, suggestion_path)
+
+
+PROJECT_FORMAT = "video-annotating-interface-project-v1"
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+
+
+def write_project(path: Path, project: dict) -> None:
+    """Persist queue selection without changing annotation files."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(project, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def validate_project(project: object, path: Path) -> dict:
+    if not isinstance(project, dict) or project.get("format") != PROJECT_FORMAT:
+        raise ValueError("Choose an annotation project JSON")
+    items = project.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("Project must contain videos")
+    index = project.get("index", 0)
+    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(items):
+        raise ValueError("Invalid project index")
+    clean, inputs, outputs = [], set(), set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise TypeError("Invalid project entry")
+        resolved = {}
+        for key in ("video", "output", "suggestions"):
+            value = item.get(key)
+            if key == "suggestions" and value is None:
+                resolved[key] = None
+                continue
+            if not isinstance(value, str) or not value or not Path(value).is_absolute():
+                raise ValueError("Project paths must be absolute")
+            resolved[key] = str(Path(value).resolve())
+        output = Path(resolved["output"])
+        if output.suffix.lower() != ".json" or output in outputs:
+            raise ValueError("Output paths must be distinct JSON files")
+        outputs.add(output)
+        inputs.add(Path(resolved["video"]))
+        if resolved["suggestions"]:
+            inputs.add(Path(resolved["suggestions"]))
+        clean.append(resolved)
+    reserved = {path.resolve(), path.with_name(path.name + ".tmp").resolve()}
+    temporary_outputs = {value.with_name(value.name + ".tmp").resolve() for value in outputs}
+    if (outputs | temporary_outputs) & (inputs | reserved) or reserved & inputs:
+        raise ValueError("Project and output paths must differ from all inputs")
+    return {"format": PROJECT_FORMAT, "items": clean, "index": index}
+
+
+def directory_project(payload: dict) -> tuple[Path, dict]:
+    video_value = payload.get("video_directory")
+    if not isinstance(video_value, str) or not video_value.strip():
+        raise ValueError("Choose a video directory")
+    video_dir = Path(video_value).expanduser().resolve(strict=True)
+    output_value = payload.get("output_directory")
+    if not video_dir.is_dir() or not isinstance(output_value, str) or not output_value.strip():
+        raise ValueError("Choose video and output directories")
+    output_dir = Path(output_value).expanduser().resolve()
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ValueError("Output location must be a directory")
+    suggestion_value = payload.get("suggestions_directory")
+    suggestions_dir = (
+        Path(suggestion_value).expanduser().resolve(strict=True) if suggestion_value else None
+    )
+    if suggestions_dir and not suggestions_dir.is_dir():
+        raise ValueError("Suggestions location must be a directory")
+    recursive = payload.get("recursive", False)
+    if not isinstance(recursive, bool):
+        raise TypeError("Recursive option must be boolean")
+    videos = [
+        file
+        for file in (video_dir.rglob("*") if recursive else video_dir.iterdir())
+        if file.is_file() and file.suffix.lower() in VIDEO_EXTENSIONS
+    ]
+
+    def natural_key(file):
+        relative = file.relative_to(video_dir)
+        name = relative.with_suffix("").as_posix()
+        return (
+            [
+                (1, int(part)) if part.isdigit() else (0, part.casefold())
+                for part in re.split(r"(\d+)", name)
+            ],
+            relative.suffix.casefold(),
+            relative.as_posix(),
+        )
+
+    videos.sort(key=natural_key)
+    stem_counts = {}
+    for video in videos:
+        key = (video.parent, video.stem.casefold())
+        stem_counts[key] = stem_counts.get(key, 0) + 1
+    items = []
+    for video in videos:
+        relative = video.relative_to(video_dir)
+        # Keep the extension: clip.mp4 and clip.mov must not share an output.
+        output = output_dir / relative.parent / (relative.name + ".annotations.json")
+        candidates = []
+        if suggestions_dir:
+            folder = suggestions_dir / relative.parent
+            candidates = [
+                folder / (relative.name + ".suggestions.json"),
+                folder / (relative.stem + ".suggestions.json"),
+                folder / (relative.stem + ".json"),
+            ]
+            candidates = list(dict.fromkeys(file for file in candidates if file.is_file()))
+        if len(candidates) > 1:
+            raise ValueError(f"Ambiguous suggestions for {relative}: choose one matching JSON")
+        if (
+            candidates
+            and candidates[0].name in {relative.stem + ".suggestions.json", relative.stem + ".json"}
+            and stem_counts[(video.parent, video.stem.casefold())] > 1
+        ):
+            raise ValueError(f"Use {relative.name}.suggestions.json for videos sharing a stem")
+        items.append(
+            {
+                "video": str(video.resolve()),
+                "output": str(output.resolve()),
+                "suggestions": str(candidates[0].resolve()) if candidates else None,
+            }
+        )
+    path = output_dir / "annotation-project.json"
+    return path, validate_project({"format": PROJECT_FORMAT, "items": items, "index": 0}, path)
+
+
+def project_state(project: dict, path: Path, active: AnnotationStore | None = None) -> dict:
+    rows = []
+    for index, item in enumerate(project["items"]):
+        row = {**item, "index": index, "reviewed": 0, "total": None, "status": "new"}
+        try:
+            if not Path(item["video"]).is_file():
+                raise ValueError("Video file is missing")
+            if item["suggestions"] and not Path(item["suggestions"]).is_file():
+                raise ValueError("Suggestions file is missing")
+            if (
+                active
+                and active.video == Path(item["video"])
+                and active.output == Path(item["output"])
+            ):
+                row.update(reviewed=len(active.labels), total=active.count)
+                row["status"] = "complete" if len(active.labels) == active.count else "in-progress"
+            elif Path(item["output"]).exists():
+                saved = json.loads(Path(item["output"]).read_text(encoding="utf-8"))
+                identity = saved["video"]
+                video = Path(item["video"])
+                if (
+                    saved.get("format") != FORMAT
+                    or identity["name"] != video.name
+                    or identity["size_bytes"] != video.stat().st_size
+                ):
+                    raise ValueError("Output belongs to another video or format")
+                total = identity["frame_count"]
+                frames = saved["frames"]
+                if (
+                    isinstance(total, bool)
+                    or not isinstance(total, int)
+                    or total <= 0
+                    or not isinstance(frames, dict)
+                ):
+                    raise ValueError("Invalid output metadata")
+                for key, label in frames.items():
+                    if str(int(key)) != key or not 0 <= int(key) < total:
+                        raise ValueError("Invalid frame key")
+                    objects = label["objects"]
+                    if (
+                        not isinstance(objects, list)
+                        or len(objects) > 100
+                        or label["status"] not in {"absent", "annotated"}
+                        or (label["status"] == "annotated") != bool(objects)
+                    ):
+                        raise ValueError("Invalid frame label")
+                    for obj in objects:
+                        validate_object(obj, identity["width"], identity["height"])
+                row.update(reviewed=len(frames), total=total)
+                row["status"] = "complete" if len(frames) == total else "in-progress"
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+            row.update(status="error", error=str(error))
+        rows.append(row)
+    return {"path": str(path), "index": project["index"], "items": rows}
 
 
 def create_server(
@@ -262,10 +484,13 @@ def create_server(
         if video and output
         else None
     )
+    project = None
+    project_path = None
     session_lock = threading.RLock()
     static = Path(__file__).parent / "static"
     html = (static / "index.html").read_bytes()
     setup_html = (static / "setup.html").read_bytes()
+    queue_html = (static / "queue.html").read_bytes()
 
     def current_store():
         if store is None:
@@ -303,6 +528,14 @@ def create_server(
                 with session_lock:
                     if route.path == "/":
                         self.send(html if store else setup_html, "text/html; charset=utf-8")
+                    elif route.path == "/queue":
+                        self.send(queue_html, "text/html; charset=utf-8")
+                    elif route.path == "/api/project":
+                        self.json(
+                            project_state(project, project_path, store)
+                            if project
+                            else {"items": []}
+                        )
                     elif route.path == "/setup":
                         self.send(setup_html, "text/html; charset=utf-8")
                     elif route.path == "/api/setup":
@@ -326,7 +559,17 @@ def create_server(
                             )
                         )
                     elif route.path == "/api/state":
-                        self.json(current_store().state())
+                        self.json(
+                            {
+                                **current_store().state(),
+                                "project": {
+                                    "index": project["index"],
+                                    "count": len(project["items"]),
+                                }
+                                if project
+                                else None,
+                            }
+                        )
                     elif route.path == "/api/frame":
                         values = parse_qs(route.query).get("index", [])
                         if len(values) != 1:
@@ -338,7 +581,7 @@ def create_server(
                 self.json({"error": str(error)}, 400)
 
         def do_POST(self) -> None:
-            nonlocal store
+            nonlocal store, project, project_path
             try:
                 self.check_host()
                 origin = self.headers.get("Origin")
@@ -353,11 +596,55 @@ def create_server(
                 if not isinstance(payload, dict):
                     raise TypeError("Request must be an object")
                 with session_lock:
-                    if self.path == "/api/open":
+                    if self.path == "/api/project/preview":
+                        path, candidate = directory_project(payload)
+                        self.json(project_state(candidate, path))
+                    elif self.path in {
+                        "/api/project/create",
+                        "/api/project/load",
+                        "/api/project/select",
+                    }:
+                        if self.path == "/api/project/create":
+                            path, candidate = directory_project(payload)
+                            if path.exists():
+                                raise ValueError(
+                                    "Project already exists. Resume it or choose another output directory"
+                                )
+                        elif self.path == "/api/project/load":
+                            path = Path(payload.get("path", "")).expanduser().resolve(strict=True)
+                            candidate = validate_project(
+                                json.loads(path.read_text(encoding="utf-8")), path
+                            )
+                        else:
+                            if project is None:
+                                raise ValueError("Open a directory project first")
+                            path, candidate = project_path, dict(project)
+                            index = payload.get("index")
+                            if (
+                                isinstance(index, bool)
+                                or not isinstance(index, int)
+                                or not 0 <= index < len(candidate["items"])
+                            ):
+                                raise ValueError("Invalid queue index")
+                            candidate["index"] = index
+                        item = candidate["items"][candidate["index"]]
+                        replacement = open_store(item["video"], item["output"], item["suggestions"])
+                        try:
+                            write_project(path, candidate)
+                        except OSError:
+                            replacement.close()
+                            raise
+                        previous, store = store, replacement
+                        project, project_path = candidate, path
+                        if previous:
+                            previous.close()
+                        self.json({"ok": True})
+                    elif self.path == "/api/open":
                         replacement = open_store(
                             payload.get("video"), payload.get("output"), payload.get("suggestions")
                         )
                         previous, store = store, replacement
+                        project, project_path = None, None
                         if previous:
                             previous.close()
                         self.json(

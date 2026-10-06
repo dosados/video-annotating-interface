@@ -40,6 +40,7 @@ if system == "Darwin":
     + ("Double-click Open.command.\n" if system == "Darwin" else f"Launch {binary}.\n")
     + "Choose video, optional suggestions JSON and output annotations JSON in the browser.\n"
     "Choose an existing output to resume. Edits save automatically.\n"
+    "For a folder, choose Directory and preview the queue. Resume with annotation-project.json.\n"
     "Keep the console open while annotating. Stop with Ctrl+C.\n"
     "Python is bundled. Files stay on your computer.\n",
     encoding="utf-8",

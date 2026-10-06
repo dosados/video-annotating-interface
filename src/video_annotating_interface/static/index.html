@@ -13,7 +13,7 @@
     button:hover { background: #315269; }
     button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #81d8ff; }
     button.active { background: #255d61; border-color: #68c6bc; }
-    header { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid #384c5b; }
+    header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid #384c5b; }
     h1 { font-size: 20px; margin: 0; }
     h2 { font-size: 16px; margin: 18px 0 8px; }
     .muted { color: #aabcc8; font-size: 13px; }
@@ -42,7 +42,7 @@
   </style>
 </head>
 <body>
-  <header><div><h1>Video Annotating Interface</h1><span id="source" class="muted">Loading…</span></div><strong id="progress">—</strong></header>
+  <header><div><h1>Video Annotating Interface</h1><span id="source" class="muted">Loading…</span></div><div class="row" style="margin:0"><strong id="progress">—</strong><button id="queue" hidden>Queue</button><button id="next-video" hidden>Next video →</button><button id="open-other">Open another…</button></div></header>
   <div class="layout">
     <main>
       <div class="row">
@@ -60,6 +60,7 @@
         <label>Zoom <input id="zoom" type="range" min="1" max="4" step="0.25" value="1"></label><span id="zoom-value">1×</span>
       </div>
       <div id="message" class="message" role="status"></div>
+      <div id="end-panel" hidden><span id="end-summary"></span> <button id="first-gap">Go to first unreviewed</button></div>
     </main>
     <aside>
       <h2>Current frame</h2><div id="frame-status">—</div><div id="objects"></div>
@@ -96,7 +97,7 @@
     let state, frame = 0, image = new Image(), requestId = 0, mode = 'point', drag = null, busy = false, frameReady = false;
     function notice(text, error = false) { $('message').textContent = text; $('message').classList.toggle('error', error); }
     let zoom = 1, offsetX = 0, offsetY = 0, viewScale = 1, navigating = false;
-    let handHeld = false, pan = null;
+    let handHeld = false, pan = null, switching = false;
     function updateCursor() { canvas.style.cursor = pan ? 'grabbing' : handHeld ? 'grab' : mode === 'box' ? 'crosshair' : 'cell'; }
     function current() { return state.frames[String(frame)] || {status: (state.suggestions[String(frame)] || []).length ? 'annotated' : 'absent', objects: state.suggestions[String(frame)] || []}; }
     function clampPan() {
@@ -162,8 +163,15 @@
     function update() {
       const label = current(), count = Object.keys(state.frames).length;
       $('progress').textContent = `${count} / ${state.video.frame_count} reviewed`;
+      const remaining = state.video.frame_count-count;
+      $('end-panel').hidden = frame !== state.video.frame_count-1 && remaining !== 0;
+      $('end-summary').textContent = remaining ? `End of video. ${remaining} frame(s) still unreviewed.` : 'Video complete. All frames reviewed.';
+      $('first-gap').hidden = remaining === 0;
+      $('queue').hidden = !state.project;
+      $('next-video').hidden = !state.project;
+      $('next-video').disabled = switching || !state.project || state.project.index >= state.project.count-1;
       $('frame').value = frame; $('timeline').value = frame; $('time').textContent = `${(frame/state.fps).toFixed(2)} s`;
-      $('frame-status').textContent = label ? (label.status === 'absent' ? 'Absent' : `${label.objects.length} object(s)`) : 'Unreviewed';
+      $('frame-status').textContent = state.frames[String(frame)] ? (label.status === 'absent' ? 'Absent' : `${label.objects.length} object(s)`) : `Unreviewed${label.objects.length ? ' · '+label.objects.length+' suggestion(s)' : ''}`;
       $('range-start').value = frame; $('range-end').value = frame;
       const list = $('objects'); list.replaceChildren();
       (label?.objects || []).forEach((obj, index) => {
@@ -176,16 +184,41 @@
       const suggested = state.suggestions[String(frame)]?.length || 0;
       if (suggested) { const info = document.createElement('p'); info.className = 'muted'; info.textContent = `${suggested} suggestion(s) in cyan`; list.append(info); }
     }
+    async function saveCurrent() {
+      if (!frameReady) { notice('Wait for the frame to load', true); return false; }
+      const at=frame, result=await post('/api/frame',{frame:at,...current()});
+      if (!result) return false;
+      state.frames[String(at)]=result.label;
+      update(); draw();
+      return true;
+    }
+    async function leaveFor(path, index = null) {
+      if (!state || navigating || switching || busy || pan || drag) return;
+      switching=true;
+      $('open-other').disabled=true; $('queue').disabled=true; $('next-video').disabled=true;
+      try {
+        if (!await saveCurrent()) return;
+        if (index !== null) {
+          const result=await post('/api/project/select',{index});
+          if (!result) return;
+        }
+        location.href=path;
+      } finally {
+        switching=false;
+        $('open-other').disabled=false; $('queue').disabled=false; update();
+      }
+    }
+    $('open-other').onclick=()=>leaveFor('/setup');
+    $('queue').onclick=()=>leaveFor('/queue');
+    $('next-video').onclick=()=>{if(state.project && state.project.index<state.project.count-1)leaveFor('/',state.project.index+1);};
+    $('first-gap').onclick=()=>{for(let i=0;i<state.video.frame_count;i++)if(!state.frames[String(i)]){go(i);return;}};
     async function go(index) {
-      if (!state || navigating || pan) return;
+      if (!state || navigating || switching || busy || pan) return;
       index = Math.max(0, Math.min(state.video.frame_count-1, Math.round(index)));
       if (frameReady) {
         navigating=true;
-        const label=current(), at=frame;
-        const result=await post('/api/frame',{frame:at,...label});
-        navigating=false;
-        if (!result) return;
-        state.frames[String(at)]=result.label;
+        try { if (!await saveCurrent()) return; }
+        finally { navigating=false; }
       }
       frame = Math.max(0, Math.min(state.video.frame_count - 1, Math.round(index)));
       drag = null; frameReady = false; update();
@@ -196,6 +229,7 @@
       incoming.src = `/api/frame?index=${frame}`;
     }
     function unreviewed(direction) {
+      if (!state || switching || navigating || busy) return;
       for (let i = frame + direction; i >= 0 && i < state.video.frame_count; i += direction)
         if (!state.frames[String(i)]) { go(i); return; }
       notice('No unreviewed frame in that direction');
@@ -212,6 +246,7 @@
       finally { busy = false; }
     }
     async function setLabel(status, objects, advance = false) {
+      if (switching || navigating) return;
       if (!frameReady) return notice('Wait for the frame to load', true);
       const at = frame, result = await post('/api/frame', {frame:at,status,objects});
       if (!result) return;
@@ -293,6 +328,7 @@
     $('frame').onchange = () => go(Number($('frame').value)); $('timeline').oninput = () => go(Number($('timeline').value));
     $('zoom').oninput = () => zoomAt(Number($('zoom').value),canvas.width/2,canvas.height/2); $('show-suggestions').onchange = draw; new ResizeObserver(resize).observe($('viewer'));
     $('mark-range').onclick = async () => {
+      if (switching || navigating || busy) return;
       const start = Number($('range-start').value), end = Number($('range-end').value);
       if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || end-start > 10000) return notice('Invalid range (maximum 10001 frames)', true);
       const overwritten = Object.keys(state.frames).filter(key => Number(key)>=start && Number(key)<=end).length;

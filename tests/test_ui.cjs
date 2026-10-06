@@ -4,8 +4,9 @@ function element(id) {
  if (!elements.has(id)) elements.set(id,{value:'1',checked:true,clientWidth:800,clientHeight:400,width:800,height:400,style:{},classList:{toggle(){}},listeners:{},addEventListener(name,fn){this.listeners[name]=fn},getBoundingClientRect(){return {left:0,top:0,width:800,height:400}},getContext(){return new Proxy({},{get:()=>()=>{}})},replaceChildren(){},append(){},setPointerCapture(){}});
  return elements.get(id);
 }
+let failRoute=null;const routes=[];const location={href:''};
 const state={video:{name:'test',width:1920,height:1080,frame_count:5},fps:60,frames:{},suggestions:{'0':[{type:'point',x:100,y:100}],'1':[{type:'point',x:200,y:200}]}};
-const context=vm.createContext({console,Math,Number,Object,String,Array,Error,document:{getElementById:element,createElement:()=>element(Math.random()),addEventListener(name,fn){documentListeners[name]=fn},activeElement:{tagName:'BODY'}},window:{addEventListener(){}},ResizeObserver:class{observe(){}},Image:class{complete=true;naturalWidth=1920;set src(v){queueMicrotask(()=>this.onload())}},fetch:async(route,options)=>{if(!options)return {ok:true,json:async()=>state};const body=JSON.parse(options.body);calls.push(body);return {ok:true,json:async()=>({label:{status:body.status,objects:body.objects}})}},queueMicrotask,confirm:()=>true});
+const context=vm.createContext({console,location,Math,Number,Object,String,Array,Error,document:{getElementById:element,createElement:()=>element(Math.random()),addEventListener(name,fn){documentListeners[name]=fn},activeElement:{tagName:'BODY'}},window:{addEventListener(){}},ResizeObserver:class{observe(){}},Image:class{complete=true;naturalWidth=1920;set src(v){queueMicrotask(()=>this.onload())}},fetch:async(route,options)=>{if(!options)return {ok:true,json:async()=>state};const body=JSON.parse(options.body);routes.push(route);calls.push(body);if(route===failRoute)return {ok:false,json:async()=>({error:'disk full'})};return {ok:true,json:async()=>({label:{status:body.status,objects:body.objects}})}},queueMicrotask,confirm:()=>true});
 const html=fs.readFileSync('src/video_annotating_interface/static/index.html','utf8');vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
@@ -59,5 +60,21 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  const click=vm.runInContext('({clientX:offsetX+200*viewScale,clientY:offsetY+200*viewScale})',context);
  element('canvas').listeners.pointerup({button:0,...click});await tick();
  assert.equal(calls.length,savedBeforePan+2,'annotation works after hand release');
+ await vm.runInContext('go(4)',context);await tick();
+ assert.equal(element('end-panel').hidden,false,'end of video shows remaining gaps');
+ assert.match(element('end-summary').textContent,/still unreviewed/);
+ vm.runInContext('state.project={index:0,count:2}',context);
+ failRoute='/api/frame';const routeCount=routes.length;
+ await vm.runInContext("leaveFor('/',1)",context);
+ assert.equal(location.href,'','failed frame save prevents switching');
+ assert.deepEqual(routes.slice(routeCount),['/api/frame']);
+ failRoute='/api/project/select';
+ await vm.runInContext("leaveFor('/',1)",context);
+ assert.equal(location.href,'','failed video opening keeps editor');
+ assert.equal(vm.runInContext('frame',context),4);
+ failRoute=null;
+ await vm.runInContext("leaveFor('/',1)",context);
+ assert.equal(location.href,'/');
+ assert.deepEqual(routes.slice(-2),['/api/frame','/api/project/select'],'save precedes switch');
  console.log('UI behavior checks passed');
 })().catch(error=>{console.error(error);process.exitCode=1});

@@ -22,6 +22,32 @@ In the browser, select:
 
 Click **Open annotation**. Keep the console open while working. Stop the application with `Ctrl+C` in the console.
 
+## Directory queue
+
+Select **Directory**, choose video and output directories, and optionally a suggestions directory.
+Enable **Include subdirectories** if needed. Click **Preview queue** to inspect naturally sorted
+videos, matched suggestions, result paths and existing progress, then **Create project and open
+first video**. Preview does not decode every video or write files.
+
+For `clip.mp4`, suggestions may be named `clip.mp4.suggestions.json`,
+`clip.suggestions.json` or `clip.json`. Only one matching file is allowed. Missing suggestions
+are fine. Videos sharing a stem, such as `clip.mp4` and `clip.mov`, require suggestions named
+with the full video filename. Subdirectories are mirrored in suggestions and output.
+Results are named `clip.mp4.annotations.json`, keeping the extension to avoid collisions.
+
+Use **Next video** to move through the queue or **Queue** to open any item. **Open another…**
+returns to file selection. These actions save the displayed frame first, including unchanged
+suggestions, and wait for a successful save. An opening error leaves the current video active.
+At the end of a video, the editor shows how many frames remain unreviewed and offers
+**Go to first unreviewed**. A video is complete only when every frame has a saved label.
+You may move to another video while leaving gaps for later.
+
+The output directory contains `annotation-project.json`, which saves the queue and current
+video atomically. To continue after restarting, choose **Directory**, browse to that file under
+**Resume project JSON**, and click **Resume**. Existing projects are not overwritten by Create.
+The queue is fixed when created; new files are not silently added. Project paths are absolute,
+so keep the inputs and results at their original locations.
+
 ## Annotate
 
 | Action | Control |

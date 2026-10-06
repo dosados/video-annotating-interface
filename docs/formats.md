@@ -67,3 +67,54 @@ The local server returns the current state at `GET /api/state` and a JPEG at `GE
 Output may contain `last_annotated_frame`, the zero-based frame index of the latest save. Opening the output restores it. Older files restore the highest saved frame, or frame 0 when empty. `GET /api/state` includes `resume_frame`.
 
 With no CLI video, `/` serves file selection. `GET /api/setup` returns default directories. `GET /api/files?path=DIR&kind=video` lists folders and supported videos; `kind=json` lists JSON files. `POST /api/open` accepts local `video`, `output`, and optional `suggestions` paths. Existing output is validated before switching. Output must be JSON and distinct from inputs.
+
+## Directory projects
+
+A directory project is separate from annotation output. It uses absolute local paths:
+
+```json
+{
+  "format": "video-annotating-interface-project-v1",
+  "index": 0,
+  "items": [
+    {
+      "video": "/data/videos/clip.mp4",
+      "suggestions": "/data/suggestions/clip.mp4.suggestions.json",
+      "output": "/data/results/clip.mp4.annotations.json"
+    }
+  ]
+}
+```
+
+`index` is the zero-based current queue position. `suggestions` may be null. `items` is a
+nonempty, fixed ordered queue. Annotation JSON keeps the existing v1 format. Completion is
+computed from reviewed frame keys, never from `last_annotated_frame` alone. Files with invalid
+output labels are displayed as errors. Unopened videos without output have unknown frame
+counts until opened; preview does not decode them. Full video identity is checked on opening.
+
+Directory scanning supports MP4, MOV, MKV, AVI and WebM, sorts naturally, and optionally
+includes subdirectories. For `sub/clip.mp4`, suggestions candidates are
+`sub/clip.mp4.suggestions.json`, `sub/clip.suggestions.json` and `sub/clip.json` in the suggestions
+directory. Multiple matches are rejected. Shared stems require full-filename suggestions.
+The output is `sub/clip.mp4.annotations.json` under the output directory. All outputs must be
+distinct and must not overwrite any project, video or suggestions file, including temporary
+save paths. Projects are atomically saved as `annotation-project.json` in the output directory.
+
+- `POST /api/project/preview`: accepts `video_directory`, `output_directory`, optional
+  `suggestions_directory` and boolean `recursive`; returns queue paths and progress without writing.
+- `POST /api/project/create`: accepts the same fields, refuses an existing project, opens the
+  first video and saves the project.
+- `POST /api/project/load`: accepts `{"path":"/data/results/annotation-project.json"}`,
+  validates the project and resumes its selected video and saved frame.
+- `POST /api/project/select`: accepts `{"index":1}`, opens that queue item, then persists the
+  selection. If opening or project saving fails, the previous session stays active.
+- `GET /api/project`: returns `path`, `index` and `items` with `reviewed`, `total` (null when
+  unknown), and `status` (`new`, `in-progress`, `complete`, `error`); returns empty items when
+  no project is open.
+
+`GET /api/state` adds `project`, either null or an object with `index` and `count`.
+`/queue` serves the queue page. Opening a single video via `/api/open` leaves project mode.
+Before navigating from the editor to setup, queue or another video, the UI saves the displayed
+frame with `/api/frame` and waits for success. API callers must perform that save themselves;
+the server cannot infer unsaved displayed suggestions. Visiting a frame alone does not mark it
+reviewed. Missing keys remain unreviewed; an explicitly saved empty frame means absent.

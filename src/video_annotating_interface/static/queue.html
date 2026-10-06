@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Video queue</title>
+<style>
+body{background:#111827;color:#e5e7eb;font:16px system-ui;margin:30px}a{color:#81d8ff}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:12px;border-bottom:1px solid #536174;overflow-wrap:anywhere}button{background:#2563eb;color:white;border:0;border-radius:6px;padding:10px;cursor:pointer}button:disabled{opacity:.5}#message{color:#fca5a5}p{overflow-wrap:anywhere}.scroll{overflow:auto}
+</style>
+<h1>Video queue</h1><p><a href="/">Return to annotation</a> · <a href="/setup">Open another project</a></p><p id="path"></p><p id="message" role="alert"></p><div class="scroll"><table><thead><tr><th>Video</th><th>Suggestions</th><th>Progress</th><th>Output</th><th>Action</th></tr></thead><tbody id="items"></tbody></table></div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);let switching=false;
+fetch('/api/project').then(async response=>{const data=await response.json();if(!response.ok)throw Error(data.error);if(!data.items.length){$('message').textContent='No directory project is open. Choose Directory on the setup page.';return;}$('path').textContent=`Project: ${data.path}`;for(const item of data.items){const row=document.createElement('tr');for(const value of [`${item.index+1}. ${item.video}${item.index===data.index?' (current)':''}`,item.suggestions||'None',item.error||`${item.status} · ${item.reviewed} / ${item.total??'?'}`,item.output]){const cell=document.createElement('td');cell.textContent=value;row.append(cell);}const cell=document.createElement('td'),button=document.createElement('button');button.textContent='Open';button.onclick=async()=>{if(switching)return;switching=true;for(const b of document.querySelectorAll('button'))b.disabled=true;try{const r=await fetch('/api/project/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:item.index})});const result=await r.json();if(!r.ok)throw Error(result.error);location.href='/';}catch(e){$('message').textContent=e.message;switching=false;for(const b of document.querySelectorAll('button'))b.disabled=false;}};cell.append(button);row.append(cell);$('items').append(row);}}).catch(e=>{$('message').textContent=e.message;});
+</script></html>
