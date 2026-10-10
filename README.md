@@ -69,6 +69,8 @@ The absence range tool marks every frame in the selected range as absent, replac
 
 Edits save automatically to the selected output JSON. Unchanged suggestions are saved when you move to another frame. No Save button is needed; check for save errors before closing.
 
+The default output folder is `outputs/` beside the executable, or inside the project when running from source. You can choose another writable location.
+
 To continue later, open the same video and output file. The interface restores the last saved frame. Input suggestions are never overwritten.
 
 [Input and output formats](docs/formats.md)

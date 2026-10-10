@@ -116,6 +116,9 @@ def test_file_selection_server(video, tmp_path):
     base = f"http://127.0.0.1:{server.server_port}"
     try:
         assert b"Choose local files" in urlopen(base).read()
+        assert json.load(urlopen(base + "/api/setup"))["output_directory"] == str(
+            tmp_path / "outputs"
+        )
         payload = {"video": str(video), "output": str(tmp_path / "labels.json")}
         req = Request(
             base + "/api/open",

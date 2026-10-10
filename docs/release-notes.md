@@ -1,3 +1,5 @@
+The default output folder is now `outputs/` beside the executable (inside the project when running from source), instead of `~/Documents/VideoAnnotations/output/`. You can still choose another writable location. Existing results are not moved.
+
 Download the archive for your operating system under **Assets**, extract it, and launch:
 
 - **Windows x64:** `video-annotating-interface.exe`

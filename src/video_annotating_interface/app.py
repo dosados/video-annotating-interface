@@ -546,7 +546,7 @@ def create_server(
                                     if (workspace / "input").is_dir()
                                     else Path.home()
                                 ),
-                                "output_directory": str(workspace / "output"),
+                                "output_directory": str(workspace / "outputs"),
                                 "active": store is not None,
                             }
                         )

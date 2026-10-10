@@ -27,10 +27,10 @@ def main() -> None:
     args = parser.parse_args()
     video = args.video
     workspace = (
-        Path.home() / "Documents" / "VideoAnnotations" if getattr(sys, "frozen", False) else ROOT
+        Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else ROOT
     )
     output = args.output or (
-        workspace / "output" / f"{video.stem}.annotations.json" if video else None
+        workspace / "outputs" / f"{video.stem}.annotations.json" if video else None
     )
     try:
         serve(
