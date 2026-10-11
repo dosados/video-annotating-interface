@@ -1,4 +1,6 @@
-The default output folder is now `outputs/` beside the executable (inside the project when running from source), instead of `~/Documents/VideoAnnotations/output/`. You can still choose another writable location. Existing results are not moved.
+The setup page is now titled **Annotate**. The active **Single video** or **Directory** mode is highlighted in blue. **Output annotations JSON** is filled immediately with `outputs/annotations.json` beside the executable; choosing a video updates the filename automatically while preserving a manually selected output path.
+
+The default output folder is `outputs/` beside the executable (inside the project when running from source). You can choose another writable location. Existing results are not moved.
 
 Download the archive for your operating system under **Assets**, extract it, and launch:
 
