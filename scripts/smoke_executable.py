@@ -81,6 +81,8 @@ def main():
                     return json.load(urlopen(request, timeout=20))
 
                 assert b"Choose local files" in get().read()
+                setup = json.load(get("api/setup"))
+                assert setup["output_directory"] == str(executable.parent / "outputs")
                 files = {"video": str(video), "output": str(output)}
                 assert post("api/open", files)["reviewed_frames"] == 0
                 assert get("api/frame?index=2").read().startswith(b"\xff\xd8")
@@ -95,7 +97,23 @@ def main():
                 assert json.loads(output.read_text())["last_annotated_frame"] == 2
                 assert post("api/open", files)["resume_frame"] == 2
                 assert json.load(get("api/state"))["frames"]["2"]["objects"][0]["x"] == 12
-                print("Bundled application: file selection, decoding, saving and resume passed")
+                assert b'id="category"' in get().read()
+                categories = [
+                    {"id": "object", "name": "Object", "kind": "entity", "color": "#ffdb66"},
+                    {"id": "opened", "name": "Opened", "kind": "event", "color": "#abcdef"},
+                ]
+                post("api/categories", {"categories": categories})
+                objects = [
+                    {"type": "point", "x": 12, "y": 14, "category_id": category}
+                    for category in ("object", "opened")
+                ]
+                post("api/frame", {"frame": 3, "status": "annotated", "objects": objects})
+                assert json.loads(output.read_text())["format"] == "video-annotating-interface-v2"
+                assert post("api/open", files)["resume_frame"] == 3
+                assert json.load(get("api/state"))["frames"]["3"]["objects"] == objects
+                print(
+                    "Bundled application: file selection, decoding, typed labels, v2 saving and resume passed"
+                )
             finally:
                 stop_process(process)
                 if process.stdout:

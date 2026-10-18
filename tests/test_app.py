@@ -7,6 +7,12 @@ import pytest
 
 from video_annotating_interface.app import AnnotationStore
 
+TEST_CATEGORIES = [
+    {"id": "object", "name": "Предмет", "kind": "entity", "color": "#ffdb66"},
+    {"id": "interaction", "name": "Взаимодействие", "kind": "event", "color": "#ff8b78"},
+    {"id": "arrival", "name": "Появление", "kind": "event", "color": "#8ee3ad"},
+]
+
 
 @pytest.fixture
 def video(tmp_path):
@@ -300,3 +306,201 @@ def test_project_switch_failure_and_restart_resume(video, tmp_path, monkeypatch)
         resumed.shutdown()
         resumed.server_close()
         thread.join()
+
+
+def test_typed_labels_upgrade_legacy_without_losing_frames(video, tmp_path):
+    from video_annotating_interface.app import FORMAT_V2
+
+    output = tmp_path / "labels.json"
+    store = AnnotationStore(video, output)
+    store.set_frame(0, "annotated", [{"type": "point", "x": 12, "y": 14}])
+    store.set_frame(2, "absent", [])
+    original = output.read_bytes()
+    store.close()
+    store = AnnotationStore(video, output)
+    assert output.read_bytes() == original, "Opening legacy data must not rewrite it"
+    store.set_categories(TEST_CATEGORIES)
+    store.set_frame(
+        1,
+        "annotated",
+        [
+            {"type": "point", "x": 12, "y": 14, "category_id": "object"},
+            {"type": "point", "x": 12, "y": 14, "category_id": "interaction"},
+            {"type": "box", "x": 1, "y": 2, "width": 4, "height": 5, "category_id": "arrival"},
+        ],
+    )
+    saved = json.loads(output.read_text())
+    assert saved["format"] == FORMAT_V2
+    assert saved["frames"]["0"]["objects"][0]["category_id"] == "object"
+    assert saved["frames"]["2"] == {"status": "absent", "objects": []}
+    assert "3" not in saved["frames"]
+    store.close()
+    store = AnnotationStore(video, output)
+    assert store.state()["frames"] == saved["frames"]
+    store.close()
+
+
+def test_custom_types_and_protect_used_types(video, tmp_path):
+
+    output = tmp_path / "labels.json"
+    store = AnnotationStore(video, output)
+    categories = [
+        *TEST_CATEGORIES,
+        {"id": "serve", "name": "Подача", "kind": "event", "color": "#abcdef"},
+    ]
+    store.set_categories(categories)
+    assert store.state()["frames"] == {}, "Configuring types must not review a frame"
+    store.set_frame(2, "annotated", [{"type": "point", "x": 3, "y": 4, "category_id": "serve"}])
+    before = output.read_bytes()
+    with pytest.raises(ValueError, match="used"):
+        store.set_categories(TEST_CATEGORIES)
+    with pytest.raises(ValueError, match="Unknown"):
+        store.set_frame(
+            3, "annotated", [{"type": "point", "x": 3, "y": 4, "category_id": "unknown"}]
+        )
+    assert output.read_bytes() == before
+    store.close()
+    store = AnnotationStore(video, output)
+    assert store.categories == categories
+    assert store.labels["2"]["objects"][0]["category_id"] == "serve"
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda c: None,
+        lambda c: c + [c[0]],
+        lambda c: [{**c[0], "color": "red"}, *c[1:]],
+        lambda c: [{**c[0], "kind": "unknown"}, *c[1:]],
+        lambda c: [{**c[0], "name": "   "}, *c[1:]],
+        lambda c: [{**c[0], "id": "invalid id"}, *c[1:]],
+    ],
+)
+def test_invalid_type_settings_are_atomic(video, tmp_path, change):
+
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    before = store.state()
+    with pytest.raises(ValueError):
+        store.set_categories(change(TEST_CATEGORIES))
+    assert store.state() == before
+    assert not store.output.exists()
+    store.close()
+
+
+def test_v2_suggestions_merge_catalog_and_remain_unreviewed(video, tmp_path):
+    from video_annotating_interface.app import FORMAT_V2, SUGGESTIONS_FORMAT_V2
+
+    suggestions = tmp_path / "suggestions.json"
+    categories = [
+        *TEST_CATEGORIES,
+        {"id": "serve", "name": "Подача", "kind": "event", "color": "#abcdef"},
+    ]
+    suggestions.write_text(
+        json.dumps(
+            {
+                "format": SUGGESTIONS_FORMAT_V2,
+                "categories": categories,
+                "frames": {
+                    "1": [{"type": "point", "x": 3, "y": 4, "category_id": "serve"}],
+                    "2": [],
+                },
+            }
+        )
+    )
+    output = tmp_path / "labels.json"
+    store = AnnotationStore(video, output, suggestions)
+    assert store.format == FORMAT_V2
+    assert store.labels == {}
+    assert not output.exists()
+    assert store.suggestions["2"] == []
+    with pytest.raises(ValueError, match="used"):
+        store.set_categories(TEST_CATEGORIES)
+    store.set_frame(0, "absent", [])
+    store.close()
+    store = AnnotationStore(video, output, suggestions)
+    assert len(store.categories) == 4
+    assert set(store.labels) == {"0"}
+    store.close()
+
+
+def test_type_upgrade_rolls_back_after_write_failure(video, tmp_path, monkeypatch):
+
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    store.set_frame(0, "annotated", [{"type": "point", "x": 3, "y": 4}])
+    before = store.state()
+    original = store.output.read_bytes()
+
+    def fail():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_write", fail)
+    with pytest.raises(OSError):
+        store.set_frame(
+            1, "annotated", [{"type": "point", "x": 3, "y": 4, "category_id": "object"}]
+        )
+    assert store.state() == before
+    with pytest.raises(OSError):
+        store.set_categories(TEST_CATEGORIES)
+    assert store.state() == before
+    assert store.output.read_bytes() == original
+    store.close()
+
+
+def test_queue_reads_v2_catalog(video, tmp_path):
+    from video_annotating_interface.app import PROJECT_FORMAT, project_state
+
+    output = tmp_path / "labels.json"
+    store = AnnotationStore(video, output)
+    categories = [
+        *TEST_CATEGORIES,
+        {"id": "serve", "name": "Подача", "kind": "event", "color": "#abcdef"},
+    ]
+    store.set_categories(categories)
+    store.set_frame(0, "annotated", [{"type": "point", "x": 3, "y": 4, "category_id": "serve"}])
+    store.close()
+    project = {
+        "format": PROJECT_FORMAT,
+        "index": 0,
+        "items": [{"video": str(video), "output": str(output), "suggestions": None}],
+    }
+    assert project_state(project, tmp_path / "project.json")["items"][0]["status"] == "in-progress"
+    data = json.loads(output.read_text())
+    data["frames"]["0"]["objects"][0]["category_id"] = "unknown"
+    output.write_text(json.dumps(data))
+    assert project_state(project, tmp_path / "project.json")["items"][0]["status"] == "error"
+
+
+def test_empty_catalog_and_no_reserved_category(video, tmp_path):
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    assert store.categories == []
+    categories = [
+        {"id": "door_open", "name": "Дверь открылась", "kind": "event", "color": "#123456"}
+    ]
+    store.set_categories(categories)
+    assert store.categories == categories
+    store.set_categories([])
+    store.close()
+    resumed = AnnotationStore(video, tmp_path / "labels.json")
+    assert resumed.categories == []
+    resumed.set_categories(categories)
+    resumed.set_frame(
+        0, "annotated", [{"type": "point", "x": 3, "y": 4, "category_id": "door_open"}]
+    )
+    assert resumed.labels["0"]["objects"][0]["category_id"] == "door_open"
+    resumed.close()
+
+
+def test_existing_tennis_v2_keeps_user_catalog(video, tmp_path):
+    output = tmp_path / "labels.json"
+    store = AnnotationStore(video, output)
+    categories = [{"id": "ball", "name": "Мяч", "kind": "entity", "color": "#123456"}]
+    store.set_categories(categories)
+    store.set_frame(0, "annotated", [{"type": "point", "x": 3, "y": 4, "category_id": "ball"}])
+    store.close()
+    before = output.read_bytes()
+    store = AnnotationStore(video, output)
+    assert store.categories == categories
+    assert store.labels["0"]["objects"][0]["category_id"] == "ball"
+    assert before == output.read_bytes()
+    store.close()

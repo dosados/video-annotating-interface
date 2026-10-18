@@ -16,17 +16,55 @@ import cv2
 
 FORMAT = "video-annotating-interface-v1"
 SUGGESTIONS_FORMAT = "video-annotating-interface-suggestions-v1"
+FORMAT_V2 = "video-annotating-interface-v2"
+SUGGESTIONS_FORMAT_V2 = "video-annotating-interface-suggestions-v2"
+CATEGORIES_FORMAT = "video-annotating-interface-categories-v1"
+DEFAULT_CATEGORIES = []
+LEGACY_CATEGORY = {"id": "object", "name": "Объект", "kind": "entity", "color": "#ffdb66"}
 
 
-def validate_object(obj: object, width: int, height: int) -> dict:
+def validate_categories(value: object) -> list[dict]:
+    if not isinstance(value, list) or not 0 <= len(value) <= 100:
+        raise ValueError("Choose up to 100 label types")
+    result, ids = [], set()
+    for category in value:
+        if not isinstance(category, dict) or set(category) != {"id", "name", "kind", "color"}:
+            raise ValueError("Label types need id, name, kind and color")
+        key, name = category["id"], category["name"]
+        if not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}", key):
+            raise ValueError("Invalid label type id")
+        if key in ids:
+            raise ValueError("Label type ids must be unique")
+        if not isinstance(name, str) or not name.strip() or len(name) > 100:
+            raise ValueError("Label type name must contain 1–100 characters")
+        if category["kind"] not in ("entity", "event"):
+            raise ValueError("Label type kind must be entity or event")
+        if not isinstance(category["color"], str) or not re.fullmatch(
+            r"#[0-9a-fA-F]{6}", category["color"]
+        ):
+            raise ValueError("Label type color must be #RRGGBB")
+        ids.add(key)
+        result.append({**category, "name": name.strip()})
+    return result
+
+
+def validate_object(obj: object, width: int, height: int, categories: list | None = None) -> dict:
     if not isinstance(obj, dict):
         raise TypeError("Object must be a JSON object")
     kind = obj.get("type")
     fields = ("x", "y") if kind == "point" else ("x", "y", "width", "height")
     if kind not in {"point", "box"}:
         raise ValueError("Object type must be point or box")
-    if set(obj) != {"type", *fields}:
-        raise ValueError(f"{kind} must contain only type and {', '.join(fields)}")
+    expected = {"type", *fields}
+    if set(obj) not in (expected, expected | {"category_id"}):
+        raise ValueError(f"{kind} needs geometry and optional category_id")
+    category = obj.get("category_id", "object")
+    if "category_id" in obj and (
+        not isinstance(category, str)
+        or category
+        not in {c["id"] for c in (categories if categories is not None else DEFAULT_CATEGORIES)}
+    ):
+        raise ValueError("Unknown label type")
     values = [obj[field] for field in fields]
     if any(
         isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
@@ -40,7 +78,10 @@ def validate_object(obj: object, width: int, height: int) -> dict:
         values[2] > 0 and values[3] > 0 and x + values[2] <= width and y + values[3] <= height
     ):
         raise ValueError("Box must have positive size and fit inside the video frame")
-    return {"type": kind, **{field: round(float(obj[field]), 2) for field in fields}}
+    result = {"type": kind, **{field: round(float(obj[field]), 2) for field in fields}}
+    if "category_id" in obj:
+        result["category_id"] = category
+    return result
 
 
 class AnnotationStore:
@@ -75,13 +116,21 @@ class AnnotationStore:
         self.lock = threading.RLock()
         self.next_frame = -1
         self.labels: dict[str, dict] = {}
+        self.format = FORMAT
+        self.categories = [dict(category) for category in DEFAULT_CATEGORIES]
         try:
             if self.output.exists():
                 saved = json.loads(self.output.read_text(encoding="utf-8"))
                 if not isinstance(saved, dict):
                     raise TypeError("Output must be a JSON object")
-                if saved.get("format") != FORMAT or saved.get("video") != self.identity:
+                if (
+                    saved.get("format") not in (FORMAT, FORMAT_V2)
+                    or saved.get("video") != self.identity
+                ):
                     raise ValueError("Output file has a different format or video identity")
+                self.format = saved["format"]
+                if self.format == FORMAT_V2:
+                    self.categories = validate_categories(saved.get("categories"))
                 if not isinstance(saved.get("frames"), dict):
                     raise ValueError("Output frames must be an object")
                 for key, label in saved["frames"].items():
@@ -95,6 +144,9 @@ class AnnotationStore:
             if self.output.exists() and "last_annotated_frame" in saved:
                 self.last_annotated_frame = self._frame(saved["last_annotated_frame"])
             self.suggestions = self._read_suggestions(suggestions) if suggestions else {}
+            self._ensure_legacy_category()
+            if self.format == FORMAT_V2:
+                self._upgrade()
         except Exception:
             self.close()
             raise
@@ -109,20 +161,40 @@ class AnnotationStore:
             raise ValueError("Status must be annotated or absent, with an objects list")
         if len(objects) > 100:
             raise ValueError("Too many objects on one frame")
-        clean = [validate_object(obj, self.width, self.height) for obj in objects]
+        clean = [validate_object(obj, self.width, self.height, self.categories) for obj in objects]
         if (status == "annotated") != bool(clean):
             raise ValueError("Annotated frames need objects; absent frames must have none")
         return {"status": status, "objects": clean}
 
     def _read_suggestions(self, path: Path) -> dict[str, list[dict]]:
         source = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(source, dict) and source.get("format") == SUGGESTIONS_FORMAT:
+        if isinstance(source, dict) and source.get("format") in (
+            SUGGESTIONS_FORMAT,
+            SUGGESTIONS_FORMAT_V2,
+        ):
+            if source["format"] == SUGGESTIONS_FORMAT_V2:
+                incoming = validate_categories(source.get("categories"))
+                if self.format == FORMAT_V2:
+                    known = {c["id"]: c for c in self.categories}
+                    for category in incoming:
+                        if (
+                            category["id"] in known
+                            and known[category["id"]]["kind"] != category["kind"]
+                        ):
+                            raise ValueError("Suggestion label type conflicts with output")
+                        if category["id"] not in known:
+                            self.categories.append(category)
+                    self.categories = validate_categories(self.categories)
+                else:
+                    self.categories = incoming
+                self.format = FORMAT_V2
             rows = source.get("frames")
             if not isinstance(rows, dict):
                 raise ValueError("Suggestion frames must be an object")
             return {
                 str(self._frame(int(key))): [
-                    validate_object(obj, self.width, self.height) for obj in objects
+                    validate_object(obj, self.width, self.height, self.categories)
+                    for obj in objects
                 ]
                 for key, objects in rows.items()
             }
@@ -137,16 +209,77 @@ class AnnotationStore:
                     continue
                 result.setdefault(str(frame), []).append(
                     validate_object(
-                        {"type": "point", "x": row["x"], "y": row["y"]}, self.width, self.height
+                        {
+                            "type": "point",
+                            "x": row["x"],
+                            "y": row["y"],
+                            **({"category_id": row["category_id"]} if "category_id" in row else {}),
+                        },
+                        self.width,
+                        self.height,
+                        self.categories,
                     )
                 )
             return result
         raise ValueError("Unsupported suggestions format")
 
+    def _ensure_legacy_category(self) -> None:
+        objects = [obj for label in self.labels.values() for obj in label["objects"]]
+        objects.extend(obj for group in self.suggestions.values() for obj in group)
+        if any("category_id" not in obj for obj in objects) and not any(
+            c["id"] == "object" for c in self.categories
+        ):
+            self.categories = [*self.categories, dict(LEGACY_CATEGORY)]
+
+    def _upgrade(self) -> None:
+        self._ensure_legacy_category()
+        self.format = FORMAT_V2
+        self.labels = {
+            key: {
+                **label,
+                "objects": [
+                    {**obj, "category_id": obj.get("category_id", "object")}
+                    for obj in label["objects"]
+                ],
+            }
+            for key, label in self.labels.items()
+        }
+        self.suggestions = {
+            key: [{**obj, "category_id": obj.get("category_id", "object")} for obj in objects]
+            for key, objects in self.suggestions.items()
+        }
+
+    def set_categories(self, categories: object) -> list[dict]:
+        clean = validate_categories(categories)
+        with self.lock:
+            ids = {c["id"] for c in clean}
+            used = {
+                obj.get("category_id", "object")
+                for label in self.labels.values()
+                for obj in label["objects"]
+            }
+            used.update(
+                obj.get("category_id", "object")
+                for objects in self.suggestions.values()
+                for obj in objects
+            )
+            if not used <= ids:
+                raise ValueError("Cannot remove label types used by annotations or suggestions")
+            previous = self.categories, self.format, self.labels, self.suggestions
+            self.categories = clean
+            self._upgrade()
+            try:
+                self._write()
+            except OSError:
+                self.categories, self.format, self.labels, self.suggestions = previous
+                raise
+            return self.categories
+
     def state(self) -> dict:
         with self.lock:
             return {
-                "format": FORMAT,
+                "format": self.format,
+                "categories": self.categories,
                 "video": self.identity,
                 "fps": self.fps,
                 "frames": dict(self.labels),
@@ -174,7 +307,8 @@ class AnnotationStore:
         with temporary.open("w", encoding="utf-8") as stream:
             json.dump(
                 {
-                    "format": FORMAT,
+                    "format": self.format,
+                    **({"categories": self.categories} if self.format == FORMAT_V2 else {}),
                     "video": self.identity,
                     "fps": self.fps,
                     "frames": self.labels,
@@ -191,20 +325,45 @@ class AnnotationStore:
 
     def set_frame(self, frame: int, status: str, objects: list) -> dict:
         key = str(self._frame(frame))
-        label = self._label(status, objects)
         with self.lock:
-            previous = self.labels.get(key)
-            previous_frame = self.last_annotated_frame
+            label = self._label(status, objects)
+            previous = (
+                self.format,
+                self.labels,
+                self.suggestions,
+                self.last_annotated_frame,
+                self.categories,
+            )
+            if any("category_id" not in obj for obj in label["objects"]) and not any(
+                c["id"] == "object" for c in self.categories
+            ):
+                self.categories = [*self.categories, dict(LEGACY_CATEGORY)]
+            if self.format == FORMAT_V2 or any("category_id" in obj for obj in label["objects"]):
+                if self.format != FORMAT_V2:
+                    self._upgrade()
+                else:
+                    self.labels = dict(self.labels)
+                label = {
+                    **label,
+                    "objects": [
+                        {**obj, "category_id": obj.get("category_id", "object")}
+                        for obj in label["objects"]
+                    ],
+                }
+            else:
+                self.labels = dict(self.labels)
             self.labels[key] = label
             self.last_annotated_frame = frame
             try:
                 self._write()
             except OSError:
-                if previous is None:
-                    self.labels.pop(key, None)
-                else:
-                    self.labels[key] = previous
-                self.last_annotated_frame = previous_frame
+                (
+                    self.format,
+                    self.labels,
+                    self.suggestions,
+                    self.last_annotated_frame,
+                    self.categories,
+                ) = previous
                 raise
         return label
 
@@ -435,7 +594,7 @@ def project_state(project: dict, path: Path, active: AnnotationStore | None = No
                 identity = saved["video"]
                 video = Path(item["video"])
                 if (
-                    saved.get("format") != FORMAT
+                    saved.get("format") not in (FORMAT, FORMAT_V2)
                     or identity["name"] != video.name
                     or identity["size_bytes"] != video.stat().st_size
                 ):
@@ -449,6 +608,11 @@ def project_state(project: dict, path: Path, active: AnnotationStore | None = No
                     or not isinstance(frames, dict)
                 ):
                     raise ValueError("Invalid output metadata")
+                categories = (
+                    validate_categories(saved.get("categories"))
+                    if saved["format"] == FORMAT_V2
+                    else DEFAULT_CATEGORIES
+                )
                 for key, label in frames.items():
                     if str(int(key)) != key or not 0 <= int(key) < total:
                         raise ValueError("Invalid frame key")
@@ -461,7 +625,7 @@ def project_state(project: dict, path: Path, active: AnnotationStore | None = No
                     ):
                         raise ValueError("Invalid frame label")
                     for obj in objects:
-                        validate_object(obj, identity["width"], identity["height"])
+                        validate_object(obj, identity["width"], identity["height"], categories)
                 row.update(reviewed=len(frames), total=total)
                 row["status"] = "complete" if len(frames) == total else "in-progress"
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
@@ -659,6 +823,9 @@ def create_server(
                             payload.get("frame"), payload.get("status"), payload.get("objects")
                         )
                         self.json({"ok": True, "label": label})
+                    elif self.path == "/api/categories":
+                        categories = current_store().set_categories(payload.get("categories"))
+                        self.json({"ok": True, "categories": categories})
                     elif self.path == "/api/clear":
                         current_store().clear_frame(payload.get("frame"))
                         self.json({"ok": True})

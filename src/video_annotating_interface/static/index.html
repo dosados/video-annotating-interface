@@ -31,10 +31,14 @@
     .message.error { color: #ffb18e; }
     .panel { border-top: 1px solid #384c5b; padding-top: 10px; margin-top: 14px; }
     .object { display: flex; justify-content: space-between; align-items: center; gap: 8px; border: 1px solid #3d5667; border-radius: 6px; padding: 7px; margin: 6px 0; overflow-wrap: anywhere; }
-    .object button { padding: 2px 7px; }
+    .object button { padding: 2px 7px; flex-shrink: 0; white-space: nowrap; }
     .numeric { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
     .numeric label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
     .numeric input { width: 75px; }
+    .type-editor { display: grid; gap: 8px; }
+    .type-editor label { display: grid; gap: 4px; }
+    .label-picker { min-width: 180px; max-width: 260px; }
+    summary { cursor: pointer; font-weight: 600; }
     .wide { width: 100%; margin-top: 8px; }
     .keys { line-height: 1.7; font-size: 13px; color: #b6c8d4; }
     kbd { border: 1px solid #526879; border-radius: 4px; padding: 1px 4px; color: #eaf0f5; }
@@ -54,15 +58,31 @@
       <div class="row"><input id="timeline" type="range" min="0" value="0"><span id="time">—</span></div>
       <div class="viewer" id="viewer"><canvas id="canvas"></canvas></div>
       <div class="row" style="margin-top:10px">
+        <label>Label <select id="category" class="label-picker" aria-label="Active label type"></select></label>
         <button id="point" class="active">Point (P)</button><button id="box">Box (B)</button>
-        <button id="accept">Accept suggestions (C)</button><button id="absent">Absent (X)</button><button id="clear">Remove all</button>
+        <button id="accept">Accept suggestions (C)</button><button id="absent">No labels (X)</button><button id="clear">Remove all types</button>
         <label><input id="show-suggestions" type="checkbox" checked> Suggestions</label>
         <label>Zoom <input id="zoom" type="range" min="1" max="4" step="0.25" value="1"></label><span id="zoom-value">1×</span>
       </div>
+      <p id="label-empty" class="muted" hidden>No label types yet. Add your first entity or event in Label types / Типы меток.</p>
       <div id="message" class="message" role="status"></div>
       <div id="end-panel" hidden><span id="end-summary"></span> <button id="first-gap">Go to first unreviewed</button></div>
     </main>
     <aside>
+      <details class="panel" id="type-settings">
+        <summary>Label types / Типы меток</summary>
+        <p class="muted">Select a type above, then click the video. Different types can share the same position.</p>
+        <div class="type-editor">
+          <label>Name <input id="category-name" maxlength="100" placeholder="Enter any entity or event name"></label>
+          <label>Kind <select id="category-kind"><option value="entity">Entity / Сущность</option><option value="event">Event / Событие</option></select></label>
+          <label>Color <input id="category-color" type="color" value="#ffdb66"></label>
+        </div>
+        <button id="category-update" class="wide">Save type changes</button>
+        <div class="row" style="margin-top:8px"><button id="category-add">Add type</button><button id="category-remove">Delete type</button></div>
+        <div class="row"><button id="categories-export">Export types</button><button id="categories-import">Import types</button></div>
+        <input id="categories-file" type="file" accept=".json,application/json" hidden>
+        <p class="muted">There are no predefined types. Enter a name and choose Entity or Event, then click Add type. Types are saved in this video's output JSON. Export/import the list to use it with another video. Types already used by labels or suggestions cannot be deleted.</p>
+      </details>
       <h2>Current frame</h2><div id="frame-status">—</div><div id="objects"></div>
       <div class="panel">
         <h2>Enter coordinates</h2>
@@ -76,18 +96,18 @@
         <p class="muted">Point mode: click the video. Box mode: drag from one corner to the opposite corner. You can add several objects to one frame.</p>
       </div>
       <div class="panel">
-        <h2>Frames with no visible object</h2>
-        <p class="muted">Marks every frame in the range as having no visible target object. Existing labels in that range are replaced.</p>
+        <h2>Frames with no labels (all types)</h2>
+        <p class="muted">Removes every entity and event in the range and marks those frames reviewed with no labels. Existing labels of all types are replaced.</p>
         <div class="row"><input id="range-start" type="number" min="0" value="0"><span>to</span><input id="range-end" type="number" min="0" value="0"></div>
         <button id="mark-range" class="wide">Mark these frames absent</button>
       </div>
       <div class="panel keys"><h2>Keyboard</h2>
         <kbd>A</kbd>/<kbd>D</kbd> or <kbd>←</kbd>/<kbd>→</kbd> one frame · <kbd>W</kbd>/<kbd>S</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd> uses Step<br>
-        <kbd>P</kbd> point · <kbd>B</kbd> box · <kbd>C</kbd> accept suggestions · <kbd>X</kbd> absent · <kbd>N</kbd> next unreviewed<br>
+        <kbd>P</kbd> point · <kbd>B</kbd> box · <kbd>C</kbd> accept suggestions · <kbd>X</kbd> no labels (all types) · <kbd>N</kbd> next unreviewed<br>
         <kbd>Space</kbd> + left drag pans the image<br>
         <kbd>Enter</kbd> next frame · <kbd>Delete</kbd> clear frame
       </div>
-      <p class="muted">Every change is saved immediately. Reopen the same video and output file to continue. Suggestions are shown in cyan. Leaving a frame saves its current objects, including unchanged suggestions. Left click adds a point or replaces the closest nearby point; right click removes a nearby object; the wheel zooms around the cursor. Hold Space and drag with the left mouse button to pan.</p>
+      <p class="muted">Every change is saved immediately. Colors and names identify label types; dashed outlines identify suggestions. Reopen the same video and output file to continue. Leaving a frame saves its current objects, including unchanged suggestions. Left click adds a point or replaces the closest nearby point; right click removes a nearby object of the selected type; the wheel zooms around the cursor. Hold Space and drag with the left mouse button to pan.</p>
     </aside>
   </div>
   <script>
@@ -99,6 +119,61 @@
     let zoom = 1, offsetX = 0, offsetY = 0, viewScale = 1, navigating = false;
     let handHeld = false, pan = null, switching = false;
     function updateCursor() { canvas.style.cursor = pan ? 'grabbing' : handHeld ? 'grab' : mode === 'box' ? 'crosshair' : 'cell'; }
+    let activeCategory = null;
+    function categoryId(obj) { return obj.category_id || 'object'; }
+    function categoryInfo(id) { return state.categories.find(c => c.id === id); }
+    function renderCategories() {
+      const select = $('category'); select.replaceChildren();
+      for (const category of state.categories) {
+        const option = document.createElement('option'); option.value = category.id;
+        option.textContent = `${category.name} · ${category.kind === 'event' ? 'Event' : 'Entity'}`;
+        select.append(option);
+      }
+      if (!categoryInfo(activeCategory)) activeCategory = state.categories[0]?.id || null;
+      select.value = activeCategory;
+      const category = categoryInfo(activeCategory);
+      select.disabled = !category;
+      select.style.borderColor = category?.color || '#567084';
+      $('category-name').value = category?.name || ''; $('category-kind').value = category?.kind || 'entity'; $('category-color').value = category?.color || '#ffdb66';
+      $('category-update').disabled = !category; $('category-remove').disabled = !category;
+      $('label-empty').hidden = !!category;
+      if (!category) $('type-settings').open = true;
+    }
+    $('category').onchange = () => { activeCategory = $('category').value; renderCategories(); };
+    async function saveCategories(categories, selected = activeCategory) {
+      if (switching || navigating || pan || drag) return;
+      const result = await post('/api/categories', {categories});
+      if (!result) return;
+      state.categories = result.categories; activeCategory = selected;
+      renderCategories(); update(); draw(); notice('Label types saved');
+    }
+    function editedCategory(id) { return {id, name:$('category-name').value.trim(), kind:$('category-kind').value, color:$('category-color').value}; }
+    $('category-update').onclick = () => saveCategories(state.categories.map(c => c.id === activeCategory ? editedCategory(c.id) : c));
+    $('category-add').onclick = () => {
+      const name = $('category-name').value.trim();
+      if (!name) return notice('Enter a name for the new type', true);
+      const id = `label_${Date.now()}_${Math.floor(Math.random()*100000)}`;
+      saveCategories([...state.categories, editedCategory(id)], id);
+    };
+    $('category-remove').onclick = () => {
+      if (!activeCategory) return;
+      saveCategories(state.categories.filter(c => c.id !== activeCategory), null);
+    };
+    $('categories-export').onclick = () => {
+      const blob = new Blob([JSON.stringify({format:'video-annotating-interface-categories-v1',categories:state.categories},null,2)+'\n'],{type:'application/json'});
+      const url = URL.createObjectURL(blob), link = document.createElement('a');
+      link.href=url; link.download='annotation-categories.json'; link.click(); URL.revokeObjectURL(url);
+    };
+    $('categories-import').onclick = () => $('categories-file').click();
+    $('categories-file').onchange = async () => {
+      const file = $('categories-file').files[0]; if (!file) return;
+      try {
+        const data = JSON.parse(await file.text());
+        if (data.format !== 'video-annotating-interface-categories-v1') throw new Error('Choose an exported label types JSON');
+        await saveCategories(data.categories);
+      } catch (error) { notice(`Cannot import types: ${error.message}`,true); }
+      finally { $('categories-file').value=''; }
+    };
     function current() { return state.frames[String(frame)] || {status: (state.suggestions[String(frame)] || []).length ? 'annotated' : 'absent', objects: state.suggestions[String(frame)] || []}; }
     function clampPan() {
       const width=state.video.width*viewScale, height=state.video.height*viewScale;
@@ -140,21 +215,39 @@
       event.preventDefault(); const r=canvas.getBoundingClientRect();
       zoomAt(zoom*Math.exp(-event.deltaY*0.002),event.clientX-r.left,event.clientY-r.top);
     }, {passive:false});
-    function drawObject(obj, color, dashed = false) {
+    function drawObject(obj, color, dashed = false, labelLine = 0) {
       ctx.strokeStyle = color; ctx.lineWidth = 2/viewScale; ctx.setLineDash(dashed ? [9, 5] : []);
       if (obj.type === 'point') {
         ctx.beginPath(); ctx.arc(obj.x, obj.y, 7/viewScale, 0, Math.PI*2); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(obj.x-17,obj.y); ctx.lineTo(obj.x+17,obj.y); ctx.moveTo(obj.x,obj.y-17); ctx.lineTo(obj.x,obj.y+17); ctx.stroke();
       } else ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
       ctx.setLineDash([]);
+      if (obj.category_id || state.categories) {
+        const category = categoryInfo(categoryId(obj));
+        if (category) {
+          ctx.font = `${12/viewScale}px system-ui`;
+          const x = obj.x+10/viewScale;
+          let y = obj.y-(12+labelLine*17)/viewScale;
+          if (y < 14/viewScale) y = obj.y+(18+labelLine*17)/viewScale;
+          const width = ctx.measureText(category.name)?.width || category.name.length*7/viewScale;
+          ctx.fillStyle = '#101820'; ctx.fillRect(x-3/viewScale,y-13/viewScale,width+6/viewScale,17/viewScale);
+          ctx.fillStyle = color; ctx.fillText(category.name,x,y);
+        }
+      }
     }
     function draw() {
       if (!state || !frameReady || !image.complete || !image.naturalWidth) return;
       ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,canvas.width,canvas.height);
       ctx.setTransform(viewScale,0,0,viewScale,offsetX,offsetY);
       ctx.drawImage(image, 0, 0, state.video.width, state.video.height);
-      if (!state.frames[String(frame)] && $('show-suggestions').checked) for (const obj of (state.suggestions[String(frame)] || [])) drawObject(obj, '#48d8ff', true);
-      if (state.frames[String(frame)]) for (const obj of current().objects) drawObject(obj, '#ffdb66');
+      const captionLines = new Map();
+      const drawLabel = (obj, dashed) => {
+        const key = `${Math.round(obj.x*viewScale/30)},${Math.round(obj.y*viewScale/30)}`;
+        const line = captionLines.get(key) || 0; captionLines.set(key,line+1);
+        drawObject(obj,categoryInfo(categoryId(obj))?.color || '#ffdb66',dashed,line);
+      };
+      if (!state.frames[String(frame)] && $('show-suggestions').checked) for (const obj of (state.suggestions[String(frame)] || [])) drawLabel(obj,true);
+      if (state.frames[String(frame)]) for (const obj of current().objects) drawLabel(obj,false);
       if (drag) {
         const x = Math.min(drag.start.x, drag.end.x), y = Math.min(drag.start.y, drag.end.y);
         drawObject({type:'box',x,y,width:Math.abs(drag.start.x-drag.end.x),height:Math.abs(drag.start.y-drag.end.y)}, '#92edba');
@@ -177,12 +270,14 @@
       (label?.objects || []).forEach((obj, index) => {
         const row = document.createElement('div'); row.className = 'object';
         const text = document.createElement('span');
-        text.textContent = obj.type === 'point' ? `Point ${index+1}: (${obj.x}, ${obj.y})` : `Box ${index+1}: (${obj.x}, ${obj.y}), ${obj.width}×${obj.height}`;
+        const category = categoryInfo(categoryId(obj));
+        row.style.borderColor = category?.color || '#567084';
+        text.textContent = `${category?.name || categoryId(obj)} · ` + (obj.type === 'point' ? `Point: (${obj.x}, ${obj.y})` : `Box: (${obj.x}, ${obj.y}), ${obj.width}×${obj.height}`);
         const remove = document.createElement('button'); remove.textContent = 'Remove'; remove.onclick = () => removeObject(index);
         row.append(text, remove); list.append(row);
       });
       const suggested = state.suggestions[String(frame)]?.length || 0;
-      if (suggested) { const info = document.createElement('p'); info.className = 'muted'; info.textContent = `${suggested} suggestion(s) in cyan`; list.append(info); }
+      if (suggested) { const info = document.createElement('p'); info.className = 'muted'; info.textContent = `${suggested} suggestion(s), dashed outlines`; list.append(info); }
     }
     async function saveCurrent() {
       if (!frameReady) { notice('Wait for the frame to load', true); return false; }
@@ -254,10 +349,12 @@
       if (advance && frame === at && at < state.video.frame_count-1) go(at+1);
     }
     function addObject(obj) {
+      if (!activeCategory) return notice('Create a label type in Label types before annotating',true);
+      obj = {...obj, category_id: obj.category_id || activeCategory};
       const objects = [...current().objects];
       let nearest = -1, distance = 40;
       if (obj.type === 'point') objects.forEach((existing, index) => {
-        if (existing.type !== 'point') return;
+        if (existing.type !== 'point' || categoryId(existing) !== categoryId(obj)) return;
         const d = Math.hypot(existing.x-obj.x, existing.y-obj.y);
         if (d < distance) { distance = d; nearest = index; }
       });
@@ -302,6 +399,7 @@
       const p=coords(event), objects=current().objects;
       let best=-1, distance=18/viewScale;
       objects.forEach((obj,i)=>{
+        if (categoryId(obj) !== activeCategory) return;
         const d=obj.type==='point' ? Math.hypot(p.x-obj.x,p.y-obj.y) : Math.hypot(Math.max(obj.x-p.x,0,p.x-obj.x-obj.width),Math.max(obj.y-p.y,0,p.y-obj.y-obj.height));
         if (d<=distance) {distance=d;best=i;}
       });
@@ -318,6 +416,7 @@
     };
     $('point').onclick = () => modeSet('point'); $('box').onclick = () => modeSet('box');
     $('accept').onclick = () => {
+      if (state.frames[String(frame)]) return notice('Frame already reviewed; existing entities and events kept');
       const objects = state.suggestions[String(frame)] || [];
       if (!objects.length) return notice('No suggestions on this frame', true);
       setLabel('annotated', objects, true);
@@ -332,7 +431,7 @@
       const start = Number($('range-start').value), end = Number($('range-end').value);
       if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || end-start > 10000) return notice('Invalid range (maximum 10001 frames)', true);
       const overwritten = Object.keys(state.frames).filter(key => Number(key)>=start && Number(key)<=end).length;
-      if (!confirm(`Mark frames ${start}–${end} absent? This replaces ${overwritten} existing frame labels.`)) return;
+      if (!confirm(`Remove all entities and events on frames ${start}–${end}? This replaces ${overwritten} existing frame labels.`)) return;
       const result = await post('/api/absent-range', {start,end});
       if (result) { for (let i=start;i<=end;i++) state.frames[String(i)]={status:'absent',objects:[]}; update(); draw(); notice(`${result.count} frames saved`); }
     };
@@ -356,7 +455,8 @@
       .then(result => { state = result; $('source').textContent = `${state.video.name} · ${state.video.width}×${state.video.height} · ${state.fps.toFixed(2)} fps`;
         $('timeline').max = state.video.frame_count-1; $('frame').max = state.video.frame_count-1;
         $('range-start').max = state.video.frame_count-1; $('range-end').max = state.video.frame_count-1;
-        modeSet('point'); resize(); go(result.resume_frame ?? 0); })
+        state.categories = result.categories || [];
+        renderCategories(); modeSet('point'); resize(); go(result.resume_frame ?? 0); })
       .catch(error => notice(`Cannot load project: ${error.message}`, true));
   </script>
 </body>

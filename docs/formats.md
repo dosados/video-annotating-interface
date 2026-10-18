@@ -29,7 +29,7 @@ A plain array of per-frame points is also accepted. Extra fields such as `confid
 ]
 ```
 
-When you leave a displayed frame, its current objects are saved to output, including unchanged suggestions. Removing all objects records absence. Frames that have never been visited remain unreviewed. Each object must fit inside the frame. A point has exactly `type`, `x`, and `y`; a box has exactly `type`, `x`, `y`, `width`, and `height`. Box width and height must be positive. At most 100 objects can be saved on one frame.
+When you leave a displayed frame, its current objects are saved to output, including unchanged suggestions. Removing all objects records absence. Frames that have never been visited remain unreviewed. Each object must fit inside the frame. In legacy v1 a point has exactly `type`, `x`, and `y`; a box has exactly `type`, `x`, `y`, `width`, and `height`. Box width and height must be positive. At most 100 objects can be saved on one frame.
 
 ## Output annotations
 
@@ -87,7 +87,7 @@ A directory project is separate from annotation output. It uses absolute local p
 ```
 
 `index` is the zero-based current queue position. `suggestions` may be null. `items` is a
-nonempty, fixed ordered queue. Annotation JSON keeps the existing v1 format. Completion is
+nonempty, fixed ordered queue. Annotation JSON accepts v1 and v2 as described below. Completion is
 computed from reviewed frame keys, never from `last_annotated_frame` alone. Files with invalid
 output labels are displayed as errors. Unopened videos without output have unknown frame
 counts until opened; preview does not decode them. Full video identity is checked on opening.
@@ -118,3 +118,118 @@ Before navigating from the editor to setup, queue or another video, the UI saves
 frame with `/api/frame` and waits for success. API callers must perform that save themselves;
 the server cannot infer unsaved displayed suggestions. Visiting a frame alone does not mark it
 reviewed. Missing keys remain unreviewed; an explicitly saved empty frame means absent.
+
+
+## Label types and v2 JSON
+
+The editor has a **Label** selector and **Label types / Типы меток** settings.
+New annotations start with an empty catalog. All types are created by the user in the UI; there are no predefined or mandatory domain labels.
+Names and colors are editable, and users can add arbitrary entities or events.
+Both kinds are spatial annotations on one frame, drawn as a point or a box;
+events are instantaneous, not time intervals. No relation between separate objects
+is implied. An event and an entity may share coordinates without replacing each other.
+Point correction and right-click deletion apply only to the active label type.
+
+New typed results use `video-annotating-interface-v2`. The envelope retains
+`video`, `fps`, `frames`, and optional `last_annotated_frame` from v1 and adds
+`categories`. Each point or box adds `category_id`:
+
+```json
+{
+  "format": "video-annotating-interface-v2",
+  "video": {"name": "clip.mp4", "size_bytes": 1234567, "frame_count": 1800, "width": 1920, "height": 1080},
+  "fps": 60.0,
+  "categories": [
+    {"id": "object", "name": "Предмет", "kind": "entity", "color": "#ffdb66"},
+    {"id": "interaction", "name": "Взаимодействие", "kind": "event", "color": "#ff8b78"},
+    {"id": "appearance", "name": "Появление", "kind": "event", "color": "#8ee3ad"}
+  ],
+  "frames": {
+    "42": {"status": "annotated", "objects": [
+      {"type": "point", "category_id": "object", "x": 525.5, "y": 620.25},
+      {"type": "point", "category_id": "appearance", "x": 525.5, "y": 620.25}
+    ]},
+    "43": {"status": "absent", "objects": []}
+  },
+  "last_annotated_frame": 43
+}
+```
+
+Catalog rules: 0–100 entries; unique stable `id` values matching
+`[a-zA-Z][a-zA-Z0-9_-]{0,63}`; a nonblank name of at most 100 characters;
+`kind` is `entity` or `event`; `color` is a six-digit hexadecimal `#RRGGBB`.
+Every referenced category must exist. No category IDs are reserved or mandatory.
+An unused category may be deleted, including the last one. Categories referenced
+by any saved object or loaded suggestion cannot be removed. Renaming a category keeps its ID and annotations.
+Untyped legacy objects are assigned the generic `object` category (display name
+«Объект»), created only when untyped data is actually present. It can be renamed;
+it can be removed once no annotations or suggestions reference it. Explicit IDs
+and catalogs from existing v2 files are preserved.
+
+Old v1 outputs and suggestions remain readable, including plain per-frame lists.
+Opening a file does not rewrite it. Saving a typed object or changing the catalog
+atomically upgrades output to v2 and assigns `object` to legacy objects. A caller
+saving only untyped objects may continue producing v1. Old versions of the app
+cannot open v2 output; retain backups when sharing files with older installations.
+
+Missing frame keys still mean unreviewed. `absent` means a reviewed frame with
+**no objects of any type**. Neither `annotated` nor an omitted category establishes
+per-category review or per-category absence. **No labels**, **Remove all types**,
+and the absence-range action affect every type; they do not merely remove the
+selected type. Accepting suggestions never replaces an already reviewed frame.
+
+## Typed suggestions
+
+Use the same catalog and object schema with a different envelope:
+
+```json
+{
+  "format": "video-annotating-interface-suggestions-v2",
+  "categories": [
+    {"id": "object", "name": "Предмет", "kind": "entity", "color": "#ffdb66"},
+    {"id": "appearance", "name": "Появление", "kind": "event", "color": "#8ee3ad"}
+  ],
+  "frames": {
+    "42": [{"type": "point", "category_id": "appearance", "x": 525.5, "y": 620.25}],
+    "43": []
+  }
+}
+```
+
+Suggestions never mark frames reviewed by themselves. Empty arrays apply only to
+the explicitly listed frames; missing frames do not imply absence. Output category
+names/colors take precedence for matching IDs; new suggestion categories are merged.
+Conflicting `kind` values for the same ID are rejected. Directory matching rules
+and `<video-filename>.suggestions.json` names are unchanged, so existing archives work.
+
+## Catalog import/export and API
+
+The settings panel exports/imports an independent UTF-8 JSON file:
+
+```json
+{
+  "format": "video-annotating-interface-categories-v1",
+  "categories": [
+    {"id": "object", "name": "Предмет", "kind": "entity", "color": "#ffdb66"},
+    {"id": "interaction", "name": "Взаимодействие", "kind": "event", "color": "#ff8b78"}
+  ]
+}
+```
+
+Catalog settings belong to each video's output, not to the directory project.
+Use export/import to reuse a catalog for another video. Import replaces the
+catalog after validation; it does not import annotations or review a frame.
+`POST /api/categories` accepts `{"categories": [...]}` and returns
+`{"ok": true, "categories": [...]}`. Changes use the same atomic output saving
+and rollback on write errors as frame edits. `GET /api/state` always includes
+`categories`, even when a legacy output has not yet been upgraded. `/api/frame`
+objects accept `category_id`; coordinates, frame numbering and status rules remain
+unchanged. Queue progress understands both v1 and v2 outputs.
+
+
+An empty catalog is valid (`"categories": []`). The editor opens the settings
+panel and asks the user to create a type before placing spatial annotations.
+Creating a type requires a name, entity/event kind, and color; IDs are generated
+by the UI and do not encode any sport or domain. An empty catalog or changing
+settings never marks a frame reviewed. Legacy v1 API clients may still submit
+untyped objects; these acquire the generic `object` catalog entry as needed.

@@ -22,6 +22,23 @@ In the browser, select:
 
 Click **Open annotation**. Keep the console open while working. Stop the application with `Ctrl+C` in the console.
 
+## Entities and events
+
+New annotations start with no label types. Open **Label types / Типы меток**,
+enter any name, choose **Entity** or **Event**, and click **Add type**. Then
+choose that type in **Label** and click the video. No types are predefined.
+Different types can share the same position. Points and boxes both carry a type;
+colors and captions identify it, and dashed outlines identify suggestions.
+Right click removes only a nearby object of the selected type.
+
+Expand **Label types / Типы меток** to rename a type, change its color/kind, or
+enter a name and click **Add type**. **Save type changes** updates the selected
+type. Export/import the list to reuse it for another video. A used type cannot
+be deleted. **No labels** and **Remove all types** clear all types on the frame.
+
+Typed annotations save as JSON v2; old v1 annotations and suggestions still open
+as generic **Объект** labels. Existing v2 catalogs keep their original names. The v2 catalog and API are documented in [docs/formats.md](docs/formats.md).
+
 ## Directory queue
 
 Select **Directory**, choose video and output directories, and optionally a suggestions directory.
