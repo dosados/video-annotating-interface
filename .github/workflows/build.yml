@@ -29,7 +29,9 @@ jobs:
       - name: Test
         run: python -m pytest -q
       - name: Test interface logic
-        run: node tests/test_ui.cjs
+        run: |
+          node tests/test_ui.cjs
+          node tests/test_shutdown_ui.cjs
       - name: Build
         run: python -m PyInstaller --clean --noconfirm video-annotating-interface.spec
       - name: Test executable

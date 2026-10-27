@@ -47,7 +47,7 @@ def test_points_boxes_absence_and_resume(video, tmp_path):
     store.set_absent_range(1, 3)
     store.clear_frame(2)
     store.close()
-    saved = json.loads(output.read_text())
+    saved = json.loads(output.read_text(encoding="utf-8"))
     assert saved["format"] == "video-annotating-interface-v1"
     assert set(saved["frames"]) == {"0", "1", "3"}
     assert saved["frames"]["0"]["objects"][1]["type"] == "box"
@@ -102,7 +102,7 @@ def test_resume_latest_save_and_legacy(video, tmp_path):
     resumed = AnnotationStore(video, output)
     assert resumed.state()["resume_frame"] == 1
     resumed.close()
-    data = json.loads(output.read_text())
+    data = json.loads(output.read_text(encoding="utf-8"))
     del data["last_annotated_frame"]
     output.write_text(json.dumps(data))
     resumed = AnnotationStore(video, output)
@@ -319,7 +319,7 @@ def test_project_switch_failure_and_restart_resume(video, tmp_path, monkeypatch)
             with pytest.raises(HTTPError):
                 post(server, "/api/project/select", {"index": 1})
         assert state(server)["video"]["name"] == video.name
-        assert json.loads(project_path.read_text())["index"] == 0
+        assert json.loads(project_path.read_text(encoding="utf-8"))["index"] == 0
         post(server, "/api/project/select", {"index": 1})
         post(server, "/api/frame", {"frame": 3, "status": "absent", "objects": []})
     finally:
@@ -362,7 +362,7 @@ def test_typed_labels_upgrade_legacy_without_losing_frames(video, tmp_path):
             {"type": "box", "x": 1, "y": 2, "width": 4, "height": 5, "category_id": "arrival"},
         ],
     )
-    saved = json.loads(output.read_text())
+    saved = json.loads(output.read_text(encoding="utf-8"))
     assert saved["format"] == FORMAT_V2
     assert saved["frames"]["0"]["objects"][0]["category_id"] == "object"
     assert saved["frames"]["2"] == {"status": "absent", "objects": []}
@@ -498,7 +498,7 @@ def test_queue_reads_v2_catalog(video, tmp_path):
         "items": [{"video": str(video), "output": str(output), "suggestions": None}],
     }
     assert project_state(project, tmp_path / "project.json")["items"][0]["status"] == "in-progress"
-    data = json.loads(output.read_text())
+    data = json.loads(output.read_text(encoding="utf-8"))
     data["frames"]["0"]["objects"][0]["category_id"] = "unknown"
     output.write_text(json.dumps(data))
     assert project_state(project, tmp_path / "project.json")["items"][0]["status"] == "error"
