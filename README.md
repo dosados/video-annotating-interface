@@ -110,3 +110,21 @@ On Windows, activate with `.venv\Scripts\activate`. The browser opens at `http:/
 Use **Exit application / Завершить** on any page to stop the local application.
 The editor saves the displayed frame before exiting; if saving fails, it stays open.
 After shutdown, close the browser tab. Simply closing the tab leaves the application running.
+
+### Experimental compact event editor
+
+On branch `feature/compact-event-editor`, the label selector, frame objects and
+category timeline use the same names and colors. Change a label directly in its
+annotation row. The tool selector offers Point, Box, Event and Interval; less-used
+review, view and numeric controls are folded away. Existing keyboard shortcuts
+are preserved (including Space + drag for pan).
+
+- **E** adds an event at the current frame; **I** starts/finishes an interval.
+- **[ / ]** select the previous/next event; **Y / R** confirm/reject the selected event.
+- **1–9** select a category; **Esc** cancels a pending interval or position edit.
+- Drag an event-category timeline lane to create an interval. Click an event to
+  select it. Its row edits category, inclusive first/last frames and optional position.
+- **↔** beside a legacy spatial event moves it to the temporal timeline.
+- **?** opens shortcut help. Event review is independent from spatial frame review.
+
+Temporal predictions use suggestions-v3; see [formats](docs/formats.md#temporal-events-and-v3-experimental-event-editor).

@@ -87,7 +87,7 @@ A directory project is separate from annotation output. It uses absolute local p
 ```
 
 `index` is the zero-based current queue position. `suggestions` may be null. `items` is a
-nonempty, fixed ordered queue. Annotation JSON accepts v1 and v2 as described below. Completion is
+nonempty, fixed ordered queue. Annotation JSON accepts v1, v2 and v3 as described below. Completion is
 computed from reviewed frame keys, never from `last_annotated_frame` alone. Files with invalid
 output labels are displayed as errors. Unopened videos without output have unknown frame
 counts until opened; preview does not decode them. Full video identity is checked on opening.
@@ -125,8 +125,8 @@ reviewed. Missing keys remain unreviewed; an explicitly saved empty frame means 
 The editor has a **Label** selector and **Label types / Типы меток** settings.
 New annotations start with an empty catalog. All types are created by the user in the UI; there are no predefined or mandatory domain labels.
 Names and colors are editable, and users can add arbitrary entities or events.
-Both kinds are spatial annotations on one frame, drawn as a point or a box;
-events are instantaneous, not time intervals. No relation between separate objects
+In v2, both kinds are spatial annotations on one frame, drawn as a point or a box;
+v2 events are instantaneous, not time intervals. For temporal events, see v3 below. No relation between separate objects
 is implied. An event and an entity may share coordinates without replacing each other.
 Point correction and right-click deletion apply only to the active label type.
 
@@ -243,3 +243,77 @@ any pending frame first. The **Exit application / Завершить** button is
 on setup, queue and editor pages; the editor waits for the current frame save
 before requesting shutdown and stays open if saving fails. The browser tab remains
 open with a stopped message. Closing a browser tab alone does not stop the server.
+
+## Temporal events and v3 (experimental event editor)
+
+The event editor adds `video-annotating-interface-v3`. It retains v2 categories,
+video identity, fps and spatial `frames`, and adds an independent `events` array.
+Only saving/editing a temporal event upgrades output to v3. Opening a file does
+not rewrite it. v1/v2 files remain readable. Earlier application versions cannot
+read v3 output. Spatial event labels in old files remain frame objects; the `↔`
+action moves one onto the event timeline atomically, retaining its coordinates.
+
+```json
+{
+  "format": "video-annotating-interface-v3",
+  "video": {"name": "clip.mp4", "size_bytes": 1234567, "frame_count": 1800, "width": 1920, "height": 1080},
+  "fps": 60.0,
+  "categories": [
+    {"id": "bounce", "name": "Удар об пол", "kind": "event", "color": "#ff8b78"}
+  ],
+  "frames": {},
+  "events": [
+    {"id": "bounce_42", "category_id": "bounce", "start": 42, "end": 42, "status": "confirmed"},
+    {"id": "contact_80", "category_id": "bounce", "start": 80, "end": 84, "status": "suggested", "geometry": {"type": "point", "x": 525.5, "y": 620.25}}
+  ]
+}
+```
+
+Event `start` and `end` are inclusive, zero-based original frame numbers;
+`0 <= start <= end < frame_count`. Equal values mean an instantaneous event.
+Each event requires a unique stable `id` matching `[a-zA-Z][a-zA-Z0-9_-]{0,95}`
+and a `category_id` whose kind is `event`. Up to 10,000 events are allowed.
+`geometry` is optional (or null); when present it is a point or box in original
+frame pixels, without its own category. For an interval it is one fixed location,
+not an interpolated trajectory. The event category supplies the name and color
+in the timeline, event list and optional video marker.
+
+Review status is `suggested`, `confirmed` or `rejected`. Editing a suggestion
+preserves `suggested` until explicitly confirmed. Rejected events remain in output
+as review decisions, hidden from the editor. Event ids link decisions to source
+suggestions: saved entries override source suggestions with the same id, so a
+rejected suggestion does not reappear on reopening. Producers must keep ids stable
+and unique for a video. Consumers should select `confirmed` for final event labels.
+
+Temporal suggestions use `video-annotating-interface-suggestions-v3`, the same
+`categories` and `events` fields, and optional spatial `frames` (default `{}`).
+Incoming events may omit `status` or use `suggested`; confirmed/rejected statuses
+are not accepted as predictions. For example:
+
+```json
+{
+  "format": "video-annotating-interface-suggestions-v3",
+  "categories": [
+    {"id": "bounce", "name": "Удар об пол", "kind": "event", "color": "#ff8b78"}
+  ],
+  "events": [{"id": "bounce_42", "category_id": "bounce", "start": 42, "end": 42}]
+}
+```
+
+`GET /api/state` adds `events` (saved overrides) and `event_suggestions` (source
+predictions). `POST /api/events` with `{"events": [...]}` replaces saved overrides
+atomically and returns `{"ok": true, "events": [...]}`. Validation/save failures
+leave memory and output unchanged. `POST /api/events/promote` with `frame`, spatial
+object `index` and a new event `id` moves a legacy event object into the timeline
+in one atomic write, returning `label` and `events` with `ok`. It requires an event
+category. Other frame objects are kept; removing the last object records spatial
+absence on that frame.
+
+Spatial frame review and temporal event review are independent. Visiting/saving a
+frame does not confirm temporal suggestions. Creating an interval never marks its
+frames reviewed. `absent`, Empty (X), Clear (Delete), absence ranges and Accept (C)
+apply only to frame objects; temporal events and their review status are preserved.
+Queue completion continues to measure reviewed spatial frames, not event coverage.
+Categories referenced by any event or event suggestion cannot be deleted or
+changed to `entity`. Legacy frame-only suggestions keep their original review
+behavior: leaving a frame saves its displayed spatial suggestions.

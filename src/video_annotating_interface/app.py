@@ -18,6 +18,8 @@ FORMAT = "video-annotating-interface-v1"
 SUGGESTIONS_FORMAT = "video-annotating-interface-suggestions-v1"
 FORMAT_V2 = "video-annotating-interface-v2"
 SUGGESTIONS_FORMAT_V2 = "video-annotating-interface-suggestions-v2"
+FORMAT_V3 = "video-annotating-interface-v3"
+SUGGESTIONS_FORMAT_V3 = "video-annotating-interface-suggestions-v3"
 CATEGORIES_FORMAT = "video-annotating-interface-categories-v1"
 DEFAULT_CATEGORIES = []
 LEGACY_CATEGORY = {"id": "object", "name": "Объект", "kind": "entity", "color": "#ffdb66"}
@@ -84,6 +86,53 @@ def validate_object(obj: object, width: int, height: int, categories: list | Non
     return result
 
 
+def validate_events(value, count, width, height, categories, *, suggestions=False):
+    if not isinstance(value, list) or len(value) > 10000:
+        raise ValueError("Events must be a list of at most 10000 entries")
+    kinds = {c["id"]: c["kind"] for c in categories}
+    result, ids = [], set()
+    for event in value:
+        if not isinstance(event, dict) or not {"id", "category_id", "start", "end"} <= event.keys():
+            raise ValueError("Events need id, category_id, start and end")
+        if set(event) - {"id", "category_id", "start", "end", "geometry", "status"}:
+            raise ValueError("Unknown event fields")
+        key = event["id"]
+        if (
+            not isinstance(key, str)
+            or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,95}", key)
+            or key in ids
+        ):
+            raise ValueError("Event ids must be unique stable identifiers")
+        if not isinstance(event["category_id"], str) or kinds.get(event["category_id"]) != "event":
+            raise ValueError("Events require an event category")
+        start, end = event["start"], event["end"]
+        if (
+            any(isinstance(v, bool) or not isinstance(v, int) for v in (start, end))
+            or not 0 <= start <= end < count
+        ):
+            raise ValueError("Event interval is outside the video")
+        status = event.get("status", "suggested" if suggestions else "confirmed")
+        if status not in (
+            ("suggested",) if suggestions else ("suggested", "confirmed", "rejected")
+        ):
+            raise ValueError("Invalid event review status")
+        clean = {
+            "id": key,
+            "category_id": event["category_id"],
+            "start": start,
+            "end": end,
+            "status": status,
+        }
+        geometry = event.get("geometry")
+        if geometry is not None:
+            if not isinstance(geometry, dict) or "category_id" in geometry:
+                raise ValueError("Event geometry must be an untyped point or box")
+            clean["geometry"] = validate_object(geometry, width, height)
+        ids.add(key)
+        result.append(clean)
+    return result
+
+
 class AnnotationStore:
     def __init__(self, video: Path, output: Path, suggestions: Path | None = None):
         self.video = video.resolve(strict=True)
@@ -117,6 +166,8 @@ class AnnotationStore:
         self.next_frame = -1
         self.labels: dict[str, dict] = {}
         self.format = FORMAT
+        self.events = []
+        self.event_suggestions = []
         self.categories = [dict(category) for category in DEFAULT_CATEGORIES]
         try:
             if self.output.exists():
@@ -124,12 +175,12 @@ class AnnotationStore:
                 if not isinstance(saved, dict):
                     raise TypeError("Output must be a JSON object")
                 if (
-                    saved.get("format") not in (FORMAT, FORMAT_V2)
+                    saved.get("format") not in (FORMAT, FORMAT_V2, FORMAT_V3)
                     or saved.get("video") != self.identity
                 ):
                     raise ValueError("Output file has a different format or video identity")
                 self.format = saved["format"]
-                if self.format == FORMAT_V2:
+                if self.format in (FORMAT_V2, FORMAT_V3):
                     self.categories = validate_categories(saved.get("categories"))
                 if not isinstance(saved.get("frames"), dict):
                     raise ValueError("Output frames must be an object")
@@ -140,12 +191,16 @@ class AnnotationStore:
                     if key != str(frame):
                         raise ValueError("Frame keys must be canonical integer strings")
                     self.labels[key] = self._label(label.get("status"), label.get("objects"))
+            if self.format == FORMAT_V3:
+                self.events = validate_events(
+                    saved.get("events", []), self.count, self.width, self.height, self.categories
+                )
             self.last_annotated_frame = max(map(int, self.labels), default=0)
             if self.output.exists() and "last_annotated_frame" in saved:
                 self.last_annotated_frame = self._frame(saved["last_annotated_frame"])
             self.suggestions = self._read_suggestions(suggestions) if suggestions else {}
             self._ensure_legacy_category()
-            if self.format == FORMAT_V2:
+            if self.format in (FORMAT_V2, FORMAT_V3):
                 self._upgrade()
         except Exception:
             self.close()
@@ -171,10 +226,11 @@ class AnnotationStore:
         if isinstance(source, dict) and source.get("format") in (
             SUGGESTIONS_FORMAT,
             SUGGESTIONS_FORMAT_V2,
+            SUGGESTIONS_FORMAT_V3,
         ):
-            if source["format"] == SUGGESTIONS_FORMAT_V2:
+            if source["format"] in (SUGGESTIONS_FORMAT_V2, SUGGESTIONS_FORMAT_V3):
                 incoming = validate_categories(source.get("categories"))
-                if self.format == FORMAT_V2:
+                if self.format in (FORMAT_V2, FORMAT_V3):
                     known = {c["id"]: c for c in self.categories}
                     for category in incoming:
                         if (
@@ -187,8 +243,18 @@ class AnnotationStore:
                     self.categories = validate_categories(self.categories)
                 else:
                     self.categories = incoming
-                self.format = FORMAT_V2
-            rows = source.get("frames")
+                if self.format != FORMAT_V3:
+                    self.format = FORMAT_V2
+                if source["format"] == SUGGESTIONS_FORMAT_V3:
+                    self.event_suggestions = validate_events(
+                        source.get("events", []),
+                        self.count,
+                        self.width,
+                        self.height,
+                        self.categories,
+                        suggestions=True,
+                    )
+            rows = source.get("frames", {})
             if not isinstance(rows, dict):
                 raise ValueError("Suggestion frames must be an object")
             return {
@@ -233,7 +299,8 @@ class AnnotationStore:
 
     def _upgrade(self) -> None:
         self._ensure_legacy_category()
-        self.format = FORMAT_V2
+        if self.format != FORMAT_V3:
+            self.format = FORMAT_V2
         self.labels = {
             key: {
                 **label,
@@ -263,6 +330,10 @@ class AnnotationStore:
                 for objects in self.suggestions.values()
                 for obj in objects
             )
+            used.update(event["category_id"] for event in self.events + self.event_suggestions)
+            event_types = {event["category_id"] for event in self.events + self.event_suggestions}
+            if any(c["id"] in event_types and c["kind"] != "event" for c in clean):
+                raise ValueError("Categories used by events must remain event types")
             if not used <= ids:
                 raise ValueError("Cannot remove label types used by annotations or suggestions")
             previous = self.categories, self.format, self.labels, self.suggestions
@@ -284,8 +355,66 @@ class AnnotationStore:
                 "fps": self.fps,
                 "frames": dict(self.labels),
                 "suggestions": self.suggestions,
+                "events": self.events,
+                "event_suggestions": self.event_suggestions,
                 "resume_frame": self.last_annotated_frame,
             }
+
+    def set_events(self, events):
+        with self.lock:
+            clean = validate_events(events, self.count, self.width, self.height, self.categories)
+            previous = self.events, self.format, self.labels, self.suggestions, self.categories
+            self.events = clean
+            self._upgrade()
+            self.format = FORMAT_V3
+            try:
+                self._write()
+            except OSError:
+                self.events, self.format, self.labels, self.suggestions, self.categories = previous
+                raise
+            return self.events
+
+    def promote_event(self, frame, index, event_id):
+        """Move a legacy spatial event onto the timeline in one atomic save."""
+        key = str(self._frame(frame))
+        with self.lock:
+            objects = (
+                self.labels[key]["objects"] if key in self.labels else self.suggestions.get(key, [])
+            )
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or not 0 <= index < len(objects)
+            ):
+                raise ValueError("Invalid annotation index")
+            obj = objects[index]
+            event = {
+                "id": event_id,
+                "category_id": obj.get("category_id", "object"),
+                "start": frame,
+                "end": frame,
+                "status": "confirmed",
+                "geometry": {
+                    field: value for field, value in obj.items() if field != "category_id"
+                },
+            }
+            # Validate before touching the existing frame.
+            validate_events(
+                [*self.events, event], self.count, self.width, self.height, self.categories
+            )
+            remaining = [obj for i, obj in enumerate(objects) if i != index]
+            previous = self.labels, self.last_annotated_frame
+            self.labels = {
+                **self.labels,
+                key: self._label("annotated" if remaining else "absent", remaining),
+            }
+            self.last_annotated_frame = frame
+            try:
+                self.set_events([*self.events, event])
+            except OSError:
+                self.labels, self.last_annotated_frame = previous
+                raise
+            return self.labels[key]
 
     def frame_jpeg(self, frame: int) -> bytes:
         self._frame(frame)
@@ -308,10 +437,15 @@ class AnnotationStore:
             json.dump(
                 {
                     "format": self.format,
-                    **({"categories": self.categories} if self.format == FORMAT_V2 else {}),
+                    **(
+                        {"categories": self.categories}
+                        if self.format in (FORMAT_V2, FORMAT_V3)
+                        else {}
+                    ),
                     "video": self.identity,
                     "fps": self.fps,
                     "frames": self.labels,
+                    **({"events": self.events} if self.format == FORMAT_V3 else {}),
                     "last_annotated_frame": self.last_annotated_frame,
                 },
                 stream,
@@ -338,8 +472,10 @@ class AnnotationStore:
                 c["id"] == "object" for c in self.categories
             ):
                 self.categories = [*self.categories, dict(LEGACY_CATEGORY)]
-            if self.format == FORMAT_V2 or any("category_id" in obj for obj in label["objects"]):
-                if self.format != FORMAT_V2:
+            if self.format in (FORMAT_V2, FORMAT_V3) or any(
+                "category_id" in obj for obj in label["objects"]
+            ):
+                if self.format not in (FORMAT_V2, FORMAT_V3):
                     self._upgrade()
                 else:
                     self.labels = dict(self.labels)
@@ -594,7 +730,7 @@ def project_state(project: dict, path: Path, active: AnnotationStore | None = No
                 identity = saved["video"]
                 video = Path(item["video"])
                 if (
-                    saved.get("format") not in (FORMAT, FORMAT_V2)
+                    saved.get("format") not in (FORMAT, FORMAT_V2, FORMAT_V3)
                     or identity["name"] != video.name
                     or identity["size_bytes"] != video.stat().st_size
                 ):
@@ -610,7 +746,7 @@ def project_state(project: dict, path: Path, active: AnnotationStore | None = No
                     raise ValueError("Invalid output metadata")
                 categories = (
                     validate_categories(saved.get("categories"))
-                    if saved["format"] == FORMAT_V2
+                    if saved["format"] in (FORMAT_V2, FORMAT_V3)
                     else DEFAULT_CATEGORIES
                 )
                 for key, label in frames.items():
@@ -626,6 +762,14 @@ def project_state(project: dict, path: Path, active: AnnotationStore | None = No
                         raise ValueError("Invalid frame label")
                     for obj in objects:
                         validate_object(obj, identity["width"], identity["height"], categories)
+                if saved["format"] == FORMAT_V3:
+                    validate_events(
+                        saved.get("events", []),
+                        total,
+                        identity["width"],
+                        identity["height"],
+                        categories,
+                    )
                 row.update(reviewed=len(frames), total=total)
                 row["status"] = "complete" if len(frames) == total else "in-progress"
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
@@ -693,7 +837,9 @@ def create_server(
                     if route.path == "/":
                         self.send(html if store else setup_html, "text/html; charset=utf-8")
                     elif route.path == "/shutdown.js":
-                        self.send((static / "shutdown.js").read_bytes(), "text/javascript; charset=utf-8")
+                        self.send(
+                            (static / "shutdown.js").read_bytes(), "text/javascript; charset=utf-8"
+                        )
                     elif route.path == "/queue":
                         self.send(queue_html, "text/html; charset=utf-8")
                     elif route.path == "/api/project":
@@ -828,6 +974,14 @@ def create_server(
                             payload.get("frame"), payload.get("status"), payload.get("objects")
                         )
                         self.json({"ok": True, "label": label})
+                    elif self.path == "/api/events/promote":
+                        label = current_store().promote_event(
+                            payload.get("frame"), payload.get("index"), payload.get("id")
+                        )
+                        self.json({"ok": True, "label": label, "events": current_store().events})
+                    elif self.path == "/api/events":
+                        events = current_store().set_events(payload.get("events"))
+                        self.json({"ok": True, "events": events})
                     elif self.path == "/api/categories":
                         categories = current_store().set_categories(payload.get("categories"))
                         self.json({"ok": True, "categories": categories})

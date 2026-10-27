@@ -125,15 +125,17 @@ def test_shutdown_server(tmp_path):
         for page in ("/", "/setup", "/queue"):
             with urlopen(base + page) as response:
                 assert b'id="shutdown"' in response.read()
-        request = Request(base + "/api/shutdown", data=b"{}", headers={
-            "Content-Type": "application/json", "Origin": "http://example.com"
-        })
+        request = Request(
+            base + "/api/shutdown",
+            data=b"{}",
+            headers={"Content-Type": "application/json", "Origin": "http://example.com"},
+        )
         with pytest.raises(HTTPError):
             urlopen(request)
         assert thread.is_alive()
-        request = Request(base + "/api/shutdown", data=b"{}", headers={
-            "Content-Type": "application/json"
-        })
+        request = Request(
+            base + "/api/shutdown", data=b"{}", headers={"Content-Type": "application/json"}
+        )
         with urlopen(request) as response:
             assert json.load(response) == {"ok": True}
         thread.join(timeout=3)
@@ -537,3 +539,168 @@ def test_existing_tennis_v2_keeps_user_catalog(video, tmp_path):
     assert store.labels["0"]["objects"][0]["category_id"] == "ball"
     assert before == output.read_bytes()
     store.close()
+
+
+def test_temporal_events_roundtrip_and_review(video, tmp_path):
+    from video_annotating_interface.app import FORMAT_V3, SUGGESTIONS_FORMAT_V3
+
+    suggestions = tmp_path / "events.json"
+    event = {"id": "bounce_1", "category_id": "interaction", "start": 1, "end": 3}
+    suggestions.write_text(
+        json.dumps(
+            {"format": SUGGESTIONS_FORMAT_V3, "categories": TEST_CATEGORIES, "events": [event]}
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "labels.json"
+    store = AnnotationStore(video, output, suggestions)
+    assert not output.exists()
+    assert store.labels == {}
+    assert store.event_suggestions == [{**event, "status": "suggested"}]
+    # Saving spatial absence neither accepts nor removes temporal suggestions.
+    store.set_frame(1, "absent", [])
+    assert store.events == []
+    edited = {**event, "category_id": "arrival", "status": "suggested"}
+    store.set_events([edited])
+    assert store.format == FORMAT_V3
+    assert set(store.labels) == {"1"}
+    store.close()
+    store = AnnotationStore(video, output, suggestions)
+    assert store.events == [edited]
+    store.set_events(
+        [{**edited, "status": "confirmed", "geometry": {"type": "point", "x": 4, "y": 6}}]
+    )
+    store.set_categories(TEST_CATEGORIES)
+    store.set_frame(2, "absent", [])
+    store.clear_frame(2)
+    assert store.format == FORMAT_V3
+    assert store.events[0]["status"] == "confirmed"
+    assert store.events[0]["geometry"]["x"] == 4
+    store.set_events([{**edited, "status": "rejected"}])
+    store.close()
+    store = AnnotationStore(video, output, suggestions)
+    assert store.events == [{**edited, "status": "rejected"}]
+    assert set(store.labels) == {"1"}
+    store.close()
+
+
+def test_temporal_event_validation_and_atomic_rollback(video, tmp_path, monkeypatch):
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    store.set_categories(TEST_CATEGORIES)
+    event = {"id": "hit", "category_id": "interaction", "start": 1, "end": 3, "status": "confirmed"}
+    store.set_events([event])
+    original = store.output.read_bytes()
+    before = store.state()
+    for patch in [
+        {"start": True},
+        {"start": -1},
+        {"end": 5},
+        {"end": 0},
+        {"category_id": "object"},
+        {"category_id": "missing"},
+        {"id": ""},
+        {"status": "unknown"},
+        {"geometry": {"type": "point", "x": 99, "y": 0}},
+    ]:
+        with pytest.raises(ValueError):
+            store.set_events([{**event, **patch}])
+        assert store.output.read_bytes() == original
+    with pytest.raises(ValueError):
+        store.set_events([event, event])
+    with pytest.raises(ValueError):
+        store.set_categories([c for c in TEST_CATEGORIES if c["id"] != "interaction"])
+    with pytest.raises(ValueError):
+        store.set_categories(
+            [{**c, "kind": "entity"} if c["id"] == "interaction" else c for c in TEST_CATEGORIES]
+        )
+
+    def fail():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_write", fail)
+    with pytest.raises(OSError):
+        store.set_events([{**event, "end": 4}])
+    assert store.state() == before
+    assert store.output.read_bytes() == original
+    store.close()
+
+
+def test_temporal_event_api_and_queue(video, tmp_path):
+    import threading
+    from urllib.request import Request, urlopen
+
+    from video_annotating_interface.app import PROJECT_FORMAT, create_server, project_state
+
+    output = tmp_path / "labels.json"
+    server = create_server(video, output, port=0, workspace=tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        for route, payload in [
+            ("/api/categories", {"categories": TEST_CATEGORIES}),
+            (
+                "/api/events",
+                {"events": [{"id": "hit", "category_id": "interaction", "start": 0, "end": 0}]},
+            ),
+        ]:
+            with urlopen(
+                Request(
+                    base + route,
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+            ) as response:
+                assert json.load(response)["ok"]
+        with urlopen(base + "/api/state") as response:
+            state = json.load(response)
+        assert state["events"][0]["status"] == "confirmed"
+        assert state["frames"] == {}
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+        server.server_close()
+    project = {
+        "format": PROJECT_FORMAT,
+        "index": 0,
+        "items": [{"video": str(video), "output": str(output), "suggestions": None}],
+    }
+    assert project_state(project, tmp_path / "project.json")["items"][0]["status"] == "in-progress"
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    saved["events"][0]["end"] = 99
+    output.write_text(json.dumps(saved), encoding="utf-8")
+    assert project_state(project, tmp_path / "project.json")["items"][0]["status"] == "error"
+
+
+def test_promote_legacy_event_is_atomic(video, tmp_path, monkeypatch):
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    store.set_categories(TEST_CATEGORIES)
+    objects = [
+        {"type": "point", "x": 4, "y": 6, "category_id": "interaction"},
+        {"type": "point", "x": 7, "y": 8, "category_id": "object"},
+    ]
+    store.set_frame(1, "annotated", objects)
+    before = store.state()
+    original = store.output.read_bytes()
+    with pytest.raises(ValueError):
+        store.promote_event(1, 1, "invalid_entity")
+    assert store.state() == before
+    with monkeypatch.context() as patch:
+
+        def fail():
+            raise OSError("disk full")
+
+        patch.setattr(store, "_write", fail)
+        with pytest.raises(OSError):
+            store.promote_event(1, 0, "hit")
+    assert store.state() == before
+    assert store.output.read_bytes() == original
+    label = store.promote_event(1, 0, "hit")
+    assert label["objects"] == [objects[1]]
+    assert store.events[0]["geometry"] == {"type": "point", "x": 4.0, "y": 6.0}
+    assert store.events[0]["start"] == store.events[0]["end"] == 1
+    store.close()
+    resumed = AnnotationStore(video, tmp_path / "labels.json")
+    assert len(resumed.events) == 1
+    assert len(resumed.labels["1"]["objects"]) == 1
+    resumed.close()
