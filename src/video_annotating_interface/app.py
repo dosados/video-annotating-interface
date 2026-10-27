@@ -853,11 +853,7 @@ def create_server(
                     elif route.path == "/api/setup":
                         self.json(
                             {
-                                "input_directory": str(
-                                    workspace / "input"
-                                    if (workspace / "input").is_dir()
-                                    else Path.home()
-                                ),
+                                "input_directory": str(workspace),
                                 "output_directory": str(workspace / "outputs"),
                                 "active": store is not None,
                             }
@@ -866,7 +862,7 @@ def create_server(
                         query = parse_qs(route.query)
                         self.json(
                             list_files(
-                                Path(query.get("path", [str(Path.home())])[0]),
+                                Path(query.get("path", [str(workspace)])[0]),
                                 query.get("kind", ["video"])[0],
                             )
                         )

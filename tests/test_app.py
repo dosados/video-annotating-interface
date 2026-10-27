@@ -157,6 +157,11 @@ def test_file_selection_server(video, tmp_path):
     base = f"http://127.0.0.1:{server.server_port}"
     try:
         assert b"Choose local files" in urlopen(base).read()
+        assert json.load(urlopen(base + "/api/setup"))["input_directory"] == str(tmp_path)
+        assert json.load(urlopen(base + "/api/files"))["path"] == str(tmp_path)
+        # An input subfolder must not change the initial project directory.
+        (tmp_path / "input").mkdir()
+        assert json.load(urlopen(base + "/api/setup"))["input_directory"] == str(tmp_path)
         assert json.load(urlopen(base + "/api/setup"))["output_directory"] == str(
             tmp_path / "outputs"
         )

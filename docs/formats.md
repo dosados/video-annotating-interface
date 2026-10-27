@@ -68,6 +68,11 @@ Output may contain `last_annotated_frame`, the zero-based frame index of the lat
 
 With no CLI video, `/` serves file selection. `GET /api/setup` returns default directories. `GET /api/files?path=DIR&kind=video` lists folders and supported videos; `kind=json` lists JSON files. `POST /api/open` accepts local `video`, `output`, and optional `suggestions` paths. Existing output is validated before switching. Output must be JSON and distinct from inputs.
 
+The initial input directory and the default `/api/files` path are the application
+workspace: the repository directory when running `run.py`, or the executable's
+directory in a packaged application. Existing paths entered in a field still
+open their own parent directory. The output default remains `outputs/` in the workspace.
+
 ## Directory projects
 
 A directory project is separate from annotation output. It uses absolute local paths:
