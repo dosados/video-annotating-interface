@@ -692,6 +692,8 @@ def create_server(
                 with session_lock:
                     if route.path == "/":
                         self.send(html if store else setup_html, "text/html; charset=utf-8")
+                    elif route.path == "/shutdown.js":
+                        self.send((static / "shutdown.js").read_bytes(), "text/javascript; charset=utf-8")
                     elif route.path == "/queue":
                         self.send(queue_html, "text/html; charset=utf-8")
                     elif route.path == "/api/project":
@@ -760,7 +762,10 @@ def create_server(
                 if not isinstance(payload, dict):
                     raise TypeError("Request must be an object")
                 with session_lock:
-                    if self.path == "/api/project/preview":
+                    if self.path == "/api/shutdown":
+                        self.json({"ok": True})
+                        threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    elif self.path == "/api/project/preview":
                         path, candidate = directory_project(payload)
                         self.json(project_state(candidate, path))
                     elif self.path in {

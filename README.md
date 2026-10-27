@@ -106,3 +106,7 @@ python run.py
 On Windows, activate with `.venv\Scripts\activate`. The browser opens at `http://127.0.0.1:8766/`.
 
 [Build instructions](docs/build.md)
+
+Use **Exit application / Завершить** on any page to stop the local application.
+The editor saves the displayed frame before exiting; if saving fails, it stays open.
+After shutdown, close the browser tab. Simply closing the tab leaves the application running.

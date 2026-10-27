@@ -46,7 +46,7 @@
   </style>
 </head>
 <body>
-  <header><div><h1>Video Annotating Interface</h1><span id="source" class="muted">Loading…</span></div><div class="row" style="margin:0"><strong id="progress">—</strong><button id="queue" hidden>Queue</button><button id="next-video" hidden>Next video →</button><button id="open-other">Open another…</button></div></header>
+  <header><div><h1>Video Annotating Interface</h1><span id="source" class="muted">Loading…</span></div><div class="row" style="margin:0"><strong id="progress">—</strong><button id="queue" hidden>Queue</button><button id="next-video" hidden>Next video →</button><button id="open-other">Open another…</button><button id="shutdown" type="button">Exit application / Завершить</button></div></header>
   <div class="layout">
     <main>
       <div class="row">
@@ -303,6 +303,11 @@
         $('open-other').disabled=false; $('queue').disabled=false; update();
       }
     }
+    window.prepareShutdown = async () => {
+      if (!state || navigating || switching || busy || pan || drag) throw Error('Wait for the current operation to finish.');
+      switching = true;
+      try { return await saveCurrent(); } finally { switching = false; }
+    };
     $('open-other').onclick=()=>leaveFor('/setup');
     $('queue').onclick=()=>leaveFor('/queue');
     $('next-video').onclick=()=>{if(state.project && state.project.index<state.project.count-1)leaveFor('/',state.project.index+1);};
@@ -460,4 +465,4 @@
       .catch(error => notice(`Cannot load project: ${error.message}`, true));
   </script>
 </body>
-</html>
+<script src="/shutdown.js"></script></html>

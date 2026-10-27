@@ -18,7 +18,7 @@ dev = ["pytest>=8", "ruff>=0.6", "playwright>=1.55"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-video_annotating_interface = ["static/*.html"]
+video_annotating_interface = ["static/*.html", "static/*.js"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

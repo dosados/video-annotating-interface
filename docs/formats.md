@@ -170,7 +170,7 @@ Old v1 outputs and suggestions remain readable, including plain per-frame lists.
 Opening a file does not rewrite it. Saving a typed object or changing the catalog
 atomically upgrades output to v2 and assigns `object` to legacy objects. A caller
 saving only untyped objects may continue producing v1. Old versions of the app
-cannot open v2 output; retain backups when sharing files with older installations.
+cannot open v2 output.
 
 Missing frame keys still mean unreviewed. `absent` means a reviewed frame with
 **no objects of any type**. Neither `annotated` nor an omitted category establishes
@@ -233,3 +233,13 @@ Creating a type requires a name, entity/event kind, and color; IDs are generated
 by the UI and do not encode any sport or domain. An empty catalog or changing
 settings never marks a frame reviewed. Legacy v1 API clients may still submit
 untyped objects; these acquire the generic `object` catalog entry as needed.
+
+## Application shutdown
+
+`POST /api/shutdown` with `{}` returns `{"ok": true}` and stops the local server.
+It uses the same Host, Origin and JSON checks as other mutations. The normal server
+cleanup releases the video and closes the listening socket. API callers must save
+any pending frame first. The **Exit application / Завершить** button is available
+on setup, queue and editor pages; the editor waits for the current frame save
+before requesting shutdown and stays open if saving fails. The browser tab remains
+open with a stopped message. Closing a browser tab alone does not stop the server.

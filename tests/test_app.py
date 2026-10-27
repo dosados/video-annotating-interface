@@ -110,6 +110,39 @@ def test_resume_latest_save_and_legacy(video, tmp_path):
     resumed.close()
 
 
+def test_shutdown_server(tmp_path):
+    import threading
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from video_annotating_interface.app import create_server
+
+    server = create_server(port=0, workspace=tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        for page in ("/", "/setup", "/queue"):
+            with urlopen(base + page) as response:
+                assert b'id="shutdown"' in response.read()
+        request = Request(base + "/api/shutdown", data=b"{}", headers={
+            "Content-Type": "application/json", "Origin": "http://example.com"
+        })
+        with pytest.raises(HTTPError):
+            urlopen(request)
+        assert thread.is_alive()
+        request = Request(base + "/api/shutdown", data=b"{}", headers={
+            "Content-Type": "application/json"
+        })
+        with urlopen(request) as response:
+            assert json.load(response) == {"ok": True}
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_file_selection_server(video, tmp_path):
     import threading
     from urllib.request import Request, urlopen

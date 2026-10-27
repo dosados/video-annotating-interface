@@ -6,3 +6,4 @@ build:
 test:
 	$(PYTHON) -m pytest -q
 	node tests/test_ui.cjs
+	node tests/test_shutdown_ui.cjs
