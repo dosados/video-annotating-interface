@@ -822,7 +822,7 @@ def test_delete_track_persists_source_suppression_and_rolls_back(video, tmp_path
         assert result["frames"]["2"] == {"status": "absent", "objects": []}
         assert "1" not in result["frames"], "Deleting a track must not review unseen frames"
         assert not result["event_suggestions"]
-        assert json.loads(output.read_text())["deleted_categories"] == ["interaction"]
+        assert json.loads(output.read_text(encoding="utf-8"))["deleted_categories"] == ["interaction"]
     finally:
         store.close()
     reopened = AnnotationStore(video, output, source)
@@ -908,7 +908,7 @@ def test_directory_catalog_is_shared_but_video_tracks_are_independent(video, tmp
         )
         assert get("/api/project/categories")["categories"] == []
         post("/api/categories", {"categories": [category]})
-        assert json.loads(project_path.read_text())["categories"] == [category]
+        assert json.loads(project_path.read_text(encoding="utf-8"))["categories"] == [category]
         assert get("/api/state")["frames"] == {}
         mark = {"type": "point", "x": 12, "y": 14, "category_id": category["id"]}
         post("/api/frame", {"frame": 0, "status": "annotated", "objects": [mark]})
