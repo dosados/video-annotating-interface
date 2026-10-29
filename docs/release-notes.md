@@ -1,6 +1,13 @@
-The setup page is now titled **Annotate**. The active **Single video** or **Directory** mode is highlighted in blue. **Output annotations JSON** is filled immediately with `outputs/annotations.json` beside the executable; choosing a video updates the filename automatically while preserving a manually selected output path.
+This release adds a compact category timeline and temporal event annotation.
 
-The default output folder is `outputs/` beside the executable (inside the project when running from source). You can choose another writable location. Existing results are not moved.
+- Create single-frame events and intervals, with optional point or box positions.
+- Confirm or reject event suggestions independently from spatial frame review.
+- Edit categories and interval boundaries directly in event rows, with keyboard shortcuts.
+- Keep the video viewport stable as label lists grow.
+- Open the file picker in the application workspace by default.
+- Save the current frame before exiting through **Exit application / Завершить**.
+
+Temporal events use JSON format v3. Existing v1/v2 files remain readable; output is upgraded only when a temporal event is saved or edited. Older application versions cannot read v3 files.
 
 Download the archive for your operating system under **Assets**, extract it, and launch:
 
@@ -8,13 +15,6 @@ Download the archive for your operating system under **Assets**, extract it, and
 - **Linux x64:** `video-annotating-interface`
 - **macOS Apple Silicon:** `Open.command`
 
-Python installation is not required. Choose your video, optional suggestions JSON and output JSON in the browser. An existing output resumes saved progress. Edits save automatically. Keep the console open while annotating; stop with Ctrl+C.
+Python installation is not required. Files stay on your computer. Existing annotation output resumes saved progress. Use **Exit application / Завершить** to save and stop the application.
 
-The applications are unsigned. The `.sha256` files contain archive checksums. `Source code` archives contain source, not the application.
-
-
-Directory annotation now supports a persistent video queue, optional recursive scanning,
-automatic suggestions matching and separate results for each video. Preview the queue before
-creating it and resume later from `annotation-project.json`. The editor saves the current frame
-before switching videos, shows gaps at the end of a video, and provides Queue, Next video and
-Open another controls.
+The `.sha256` files contain archive checksums. The applications are unsigned. Source code archives contain source, not the application.
