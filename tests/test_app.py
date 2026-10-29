@@ -709,3 +709,452 @@ def test_promote_legacy_event_is_atomic(video, tmp_path, monkeypatch):
     assert len(resumed.events) == 1
     assert len(resumed.labels["1"]["objects"]) == 1
     resumed.close()
+
+
+def test_file_picker_hidden_entries(tmp_path):
+    from video_annotating_interface.app import list_files
+
+    for name in ("visible.mp4", ".hidden.mp4", "labels.json", ".labels.json"):
+        (tmp_path / name).touch()
+    (tmp_path / ".private").mkdir()
+    (tmp_path / "folder").mkdir()
+    names = lambda kind, hidden=False: {
+        entry["name"] for entry in list_files(tmp_path, kind, hidden)["entries"]
+    }
+    assert names("video") == {"folder", "visible.mp4"}
+    assert names("video", True) == {"folder", ".private", "visible.mp4", ".hidden.mp4"}
+    assert names("json") == {"folder", "labels.json"}
+    assert ".labels.json" in names("json", True)
+
+
+def test_preview_endpoint_without_annotation_session(video, tmp_path):
+    import threading
+    from urllib.error import HTTPError
+    from urllib.parse import urlencode
+    from urllib.request import urlopen
+
+    from video_annotating_interface.app import create_server
+
+    server = create_server(port=0, workspace=tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    (tmp_path / ".hidden").mkdir()
+    broken = tmp_path / "broken.mp4"
+    broken.touch()
+    try:
+        assert ".hidden" not in {
+            e["name"] for e in json.load(urlopen(base + "/api/files"))["entries"]
+        }
+        assert ".hidden" in {
+            e["name"] for e in json.load(urlopen(base + "/api/files?show_hidden=true"))["entries"]
+        }
+        with urlopen(base + "/api/preview?" + urlencode({"path": str(video)})) as response:
+            assert response.headers["Content-Type"] == "image/jpeg"
+            frame = cv2.imdecode(np.frombuffer(response.read(), dtype=np.uint8), cv2.IMREAD_COLOR)
+            assert frame.shape[:2] == (48, 64)
+        for path in (str(broken), str(tmp_path), ""):
+            with pytest.raises(HTTPError) as error:
+                urlopen(base + "/api/preview?" + urlencode({"path": path}))
+            assert error.value.code == 400
+        assert json.load(urlopen(base + "/api/setup"))["active"] is False
+        assert not (tmp_path / "outputs").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_frame_cache_reuses_jpeg_without_reviewing(video, tmp_path):
+    store = AnnotationStore(video, tmp_path / "annotations.json")
+    try:
+        first = store.frame_jpeg(0)
+        store.frame_jpeg(1)
+        assert store.frame_jpeg(0) is first
+        decoder_position = store.next_frame
+        store.frame_jpeg(0)
+        assert store.next_frame == decoder_position, "Cache hits must not change decoder position"
+        assert store.frame_jpeg(2).startswith(b"\xff\xd8")
+        assert store.frame_cache_bytes == sum(map(len, store.frame_cache.values()))
+        assert store.state()["frames"] == {}
+        assert not store.output.exists()
+    finally:
+        store.close()
+    assert not store.frame_cache
+    assert store.frame_cache_bytes == 0
+
+
+def test_delete_track_persists_source_suppression_and_rolls_back(video, tmp_path, monkeypatch):
+    source = tmp_path / "suggestions.json"
+    point = lambda category: {"type": "point", "x": 12, "y": 14, "category_id": category}
+    source.write_text(
+        json.dumps(
+            {
+                "format": "video-annotating-interface-suggestions-v3",
+                "categories": TEST_CATEGORIES,
+                "frames": {
+                    "0": [point("object"), point("interaction")],
+                    "1": [point("interaction")],
+                },
+                "events": [{"id": "hit", "category_id": "interaction", "start": 0, "end": 2}],
+            }
+        )
+    )
+    output = tmp_path / "labels.json"
+    store = AnnotationStore(video, output, source)
+    try:
+        store.set_frame(0, "annotated", [point("object"), point("interaction")])
+        store.set_frame(2, "annotated", [point("interaction")])
+        before, disk = store.state(), output.read_bytes()
+        with monkeypatch.context() as patch:
+
+            def fail():
+                raise OSError("disk full")
+
+            patch.setattr(store, "_write", fail)
+            with pytest.raises(OSError):
+                store.delete_category("interaction")
+        assert store.state() == before
+        assert store.deleted_categories == set()
+        assert output.read_bytes() == disk
+        result = store.delete_category("interaction")
+        assert result["frames"]["0"]["objects"] == [point("object")]
+        assert result["frames"]["2"] == {"status": "absent", "objects": []}
+        assert "1" not in result["frames"], "Deleting a track must not review unseen frames"
+        assert not result["event_suggestions"]
+        assert json.loads(output.read_text())["deleted_categories"] == ["interaction"]
+    finally:
+        store.close()
+    reopened = AnnotationStore(video, output, source)
+    try:
+        assert "interaction" not in {c["id"] for c in reopened.categories}
+        assert not reopened.event_suggestions
+        assert reopened.suggestions["1"] == []
+        assert "1" not in reopened.labels
+        reopened.set_categories(TEST_CATEGORIES)
+        assert not reopened.deleted_categories
+    finally:
+        reopened.close()
+
+
+def test_delete_spatial_run_preserves_other_types_and_events(video, tmp_path, monkeypatch):
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    try:
+        store.set_categories(TEST_CATEGORIES)
+        objects = [
+            {"type": "point", "x": 12, "y": 14, "category_id": c} for c in ("object", "interaction")
+        ]
+        store.set_frame(0, "annotated", objects)
+        store.set_frame(1, "annotated", [objects[0]])
+        store.set_events(
+            [
+                {
+                    "id": "hit",
+                    "category_id": "interaction",
+                    "start": 0,
+                    "end": 2,
+                    "status": "confirmed",
+                }
+            ]
+        )
+        before = store.state()
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "_write", lambda: (_ for _ in ()).throw(OSError("disk full")))
+            with pytest.raises(OSError):
+                store.delete_spatial_marks("object", 0, 1)
+        assert store.state() == before
+        result = store.delete_spatial_marks("object", 0, 1)
+        assert result["frames"]["0"]["objects"] == [objects[1]]
+        assert result["frames"]["1"] == {"status": "absent", "objects": []}
+        assert result["events"] == before["events"]
+        assert "2" not in result["frames"]
+    finally:
+        store.close()
+
+
+def test_directory_catalog_is_shared_but_video_tracks_are_independent(video, tmp_path, monkeypatch):
+    import threading
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from video_annotating_interface import app
+
+    (tmp_path / "sample2.mp4").write_bytes(video.read_bytes())
+    output = tmp_path / "results"
+    project_path = output / "annotation-project.json"
+    category = TEST_CATEGORIES[1]
+    server = app.create_server(port=0, workspace=tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def get(route):
+        with urlopen(base + route) as response:
+            return json.load(response)
+
+    def post(route, payload):
+        request = Request(
+            base + route,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(request) as response:
+            return json.load(response)
+
+    try:
+        post(
+            "/api/project/create",
+            {"video_directory": str(tmp_path), "output_directory": str(output)},
+        )
+        assert get("/api/project/categories")["categories"] == []
+        post("/api/categories", {"categories": [category]})
+        assert json.loads(project_path.read_text())["categories"] == [category]
+        assert get("/api/state")["frames"] == {}
+        mark = {"type": "point", "x": 12, "y": 14, "category_id": category["id"]}
+        post("/api/frame", {"frame": 0, "status": "annotated", "objects": [mark]})
+        first_output = output / (video.name + ".annotations.json")
+        first_disk = first_output.read_bytes()
+        post("/api/project/select", {"index": 1})
+        assert get("/api/state")["categories"] == [], (
+            "A fresh video must not inherit directory tracks"
+        )
+        assert get("/api/project/categories")["categories"] == [category]
+        with pytest.raises(HTTPError):
+            post("/api/project/categories/add", {"category_id": "missing"})
+        with monkeypatch.context() as patch:
+
+            def fail(*args):
+                raise OSError("disk full")
+
+            patch.setattr(app.AnnotationStore, "_write", fail)
+            with pytest.raises(HTTPError):
+                post("/api/project/categories/add", {"category_id": category["id"]})
+        assert get("/api/state")["categories"] == []
+        post("/api/project/categories/add", {"category_id": category["id"]})
+        assert get("/api/state")["categories"] == [category]
+        assert get("/api/state")["frames"] == {}, "Attaching a type does not review a frame"
+        with pytest.raises(HTTPError):
+            post("/api/project/categories/add", {"category_id": category["id"]})
+        post("/api/categories/delete", {"category_id": category["id"]})
+        assert get("/api/state")["categories"] == []
+        assert get("/api/project/categories")["categories"] == [category], (
+            "Local track deletion keeps reusable definition"
+        )
+        assert first_output.read_bytes() == first_disk, (
+            "Deleting a directory track must not alter other videos"
+        )
+        post("/api/project/select", {"index": 0})
+        assert get("/api/state")["frames"]["0"]["objects"] == [mark]
+        assert get("/api/state")["categories"] == [category], (
+            "Returning to a video restores its selected tracks"
+        )
+        post("/api/project/load", {"path": str(project_path)})
+        assert get("/api/project/categories")["categories"] == [category]
+        assert get("/api/state")["categories"] == [category]
+        with monkeypatch.context() as patch:
+
+            def fail(*args):
+                raise OSError("catalog is read-only")
+
+            patch.setattr(app, "write_project", fail)
+            with pytest.raises(HTTPError):
+                post("/api/categories", {"categories": [category, TEST_CATEGORIES[0]]})
+        assert get("/api/state")["categories"] == [category]
+        assert get("/api/project/categories")["categories"] == [category]
+        post("/api/open", {"video": str(video), "output": str(tmp_path / "single.json")})
+        with pytest.raises(HTTPError):
+            get("/api/project/categories")
+        with pytest.raises(HTTPError):
+            post("/api/project/categories/add", {"category_id": category["id"]})
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_prefetch_uses_independent_decoder_and_closes_cleanly(tmp_path, monkeypatch):
+    import threading
+
+    video = tmp_path / "long.mp4"
+    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 15, (64, 48))
+    for index in range(80):
+        writer.write(np.full((48, 64, 3), index * 3, np.uint8))
+    writer.release()
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    buffered = threading.Event()
+    target = [16]
+    cache_frame = store._cache_frame
+
+    def record(frame, data):
+        cache_frame(frame, data)
+        if frame == target[0]:
+            buffered.set()
+
+    monkeypatch.setattr(store, "_cache_frame", record)
+    try:
+        store.frame_jpeg(0)
+        assert buffered.wait(3), "Forward frames must be prefetched without browser requests"
+        foreground_position = store.next_frame
+        for index in range(1, 16):
+            assert store.frame_jpeg(index).startswith(b"\xff\xd8")
+        assert store.next_frame == foreground_position, (
+            "Prefetch must not move the foreground decoder"
+        )
+        target[0] = 76
+        buffered.clear()
+        store.frame_jpeg(60)
+        assert buffered.wait(3)
+        target[0] = 58
+        buffered.clear()
+        store.frame_jpeg(59)
+        assert buffered.wait(3), "Reverse navigation must buffer a contiguous preceding window"
+        foreground_position = store.next_frame
+        for index in range(58, 44, -1):
+            store.frame_jpeg(index)
+        assert store.next_frame == foreground_position
+        with store.frame_cache_lock:
+            assert store.frame_cache_bytes == sum(map(len, store.frame_cache.values()))
+            assert store.frame_cache_bytes <= 32 * 1024 * 1024
+        assert store.labels == {}
+        assert not store.output.exists(), "Buffering must never save annotations"
+    finally:
+        store.close()
+    assert not store.prefetch_thread.is_alive()
+    assert not store.frame_cache
+
+
+def test_frame_batches_save_once_and_roll_back_atomically(video, tmp_path, monkeypatch):
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    try:
+        store.set_categories(TEST_CATEGORIES)
+        store.set_events(
+            [
+                {
+                    "id": "hit",
+                    "category_id": "interaction",
+                    "start": 0,
+                    "end": 3,
+                    "status": "confirmed",
+                }
+            ]
+        )
+        original_write = store._write
+        writes = []
+
+        def counted_write():
+            writes.append(1)
+            original_write()
+
+        monkeypatch.setattr(store, "_write", counted_write)
+        batch = [
+            {
+                "frame": 0,
+                "status": "annotated",
+                "objects": [{"type": "point", "x": 12, "y": 14, "category_id": "object"}],
+            },
+            {"frame": 1, "status": "absent", "objects": []},
+        ]
+        result = store.set_frames(batch)
+        assert len(writes) == 1
+        assert result["0"]["objects"][0]["x"] == 12
+        assert result["1"] == {"status": "absent", "objects": []}
+        assert "2" not in store.labels
+        assert store.events[0]["id"] == "hit"
+        before, disk = store.state(), store.output.read_bytes()
+        for invalid in (
+            [],
+            batch + [batch[0]],
+            [*batch, {"frame": 9, "status": "absent", "objects": []}],
+        ):
+            with pytest.raises(ValueError):
+                store.set_frames(invalid)
+            assert store.state() == before
+            assert store.output.read_bytes() == disk
+
+        def fail():
+            raise OSError("disk full")
+
+        monkeypatch.setattr(store, "_write", fail)
+        with pytest.raises(OSError):
+            store.set_frames([{"frame": 3, "status": "absent", "objects": []}])
+        assert store.state() == before
+        assert store.output.read_bytes() == disk
+    finally:
+        store.close()
+
+
+def test_frame_request_does_not_wait_for_batch_disk_write(video, tmp_path, monkeypatch):
+    import threading
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    from video_annotating_interface import app
+
+    entered, release = threading.Event(), threading.Event()
+    original_write = app.AnnotationStore._write
+
+    def slow_write(store):
+        entered.set()
+        assert release.wait(3)
+        original_write(store)
+
+    monkeypatch.setattr(app.AnnotationStore, "_write", slow_write)
+    server = app.create_server(video, tmp_path / "labels.json", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    errors = []
+
+    def save():
+        try:
+            request = Request(
+                base + "/api/frames",
+                data=json.dumps(
+                    {"frames": [{"frame": 0, "status": "absent", "objects": []}]}
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request) as response:
+                assert json.load(response)["frames"]["0"]["status"] == "absent"
+        except (OSError, ValueError, AssertionError) as error:
+            errors.append(error)
+
+    saving = threading.Thread(target=save)
+    saving.start()
+    try:
+        assert entered.wait(2)
+        with urlopen(base + "/api/frame?" + urlencode({"index": 2}), timeout=1) as response:
+            assert response.read().startswith(b"\xff\xd8"), (
+                "JPEG delivery must continue while disk saving is blocked"
+            )
+    finally:
+        release.set()
+        saving.join(3)
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert not errors
+
+
+def test_video_close_waits_for_active_frame_reader(video, tmp_path):
+    import threading
+
+    store = AnnotationStore(video, tmp_path / "labels.json")
+    store.begin_frame_read()
+    closed = threading.Event()
+
+    def close():
+        store.close()
+        closed.set()
+
+    closing = threading.Thread(target=close)
+    closing.start()
+    try:
+        assert not closed.wait(0.02)
+        assert store.frame_jpeg(0).startswith(b"\xff\xd8")
+    finally:
+        store.end_frame_read()
+        closing.join(3)
+    assert closed.is_set()
+    with pytest.raises(ValueError):
+        store.begin_frame_read()

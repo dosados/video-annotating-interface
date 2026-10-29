@@ -44,6 +44,8 @@
     .keys { line-height: 1.7; font-size: 13px; color: #b6c8d4; }
     kbd { border: 1px solid #526879; border-radius: 4px; padding: 1px 4px; color: #eaf0f5; }
     [hidden] { display: none !important; }
+    #track-menu { position:fixed;z-index:1000;padding:4px;background:#172632;border:1px solid #567084;border-radius:6px;box-shadow:0 4px 18px #0008; }
+    #track-menu button { display:block;width:100%;text-align:left;color:#ffb4b4; }
     .menu { position: relative; }
     .menu > summary { list-style: none; padding: 7px 9px; border: 1px solid #567084; border-radius: 6px; font-weight: 400; }
     .menu[open] { display: flex; gap: 7px; flex-wrap: wrap; }
@@ -110,6 +112,7 @@
         <input id="categories-file" type="file" accept=".json,application/json" hidden>
 
       </details>
+      <button id="directory-types" class="wide" hidden>Types in directory… / Типы директории</button>
       <h2>Annotations</h2><div id="event-list"></div>
       <h2>Frame</h2><div id="frame-status">—</div><div id="objects"></div>
       <details class="panel"><summary>Coordinates</summary>
@@ -134,11 +137,19 @@
 
     </aside>
   </div>
+  <div id="track-menu" role="menu" hidden><button id="track-menu-delete" role="menuitem">Удалить</button></div>
+  <dialog id="directory-types-dialog" style="width:min(520px,90vw);max-height:70vh;overflow:auto;background:#172632;color:#eaf0f5;border:1px solid #567084;border-radius:8px">
+    <h2>Types in directory / Типы директории</h2>
+    <p class="muted">Add a type to this video to create its track.</p>
+    <div id="directory-types-list"></div>
+    <p id="directory-types-error" class="message error" role="alert"></p>
+    <button id="directory-types-close">Close</button>
+  </dialog>
   <script>
     'use strict';
     const $ = id => document.getElementById(id);
     const canvas = $('canvas'), ctx = canvas.getContext('2d');
-    let state, frame = 0, image = new Image(), requestId = 0, mode = 'point', drag = null, busy = false, frameReady = false;
+    let state, frame = 0, image = new Image(), mode = 'point', drag = null, busy = false, frameReady = false;
     function notice(text, error = false) { $('message').textContent = text; $('message').classList.toggle('error', error); }
     let zoom = 1, offsetX = 0, offsetY = 0, viewScale = 1, navigating = false;
     let handHeld = false, pan = null, switching = false;
@@ -164,7 +175,7 @@
       if (!category) $('type-settings').open = true;
       syncTools();
     }
-    $('category').onchange = () => { activeCategory = $('category').value; renderCategories(); modeSet(categoryInfo(activeCategory)?.kind === 'event' ? 'event' : 'point'); };
+    $('category').onchange = () => { activeCategory = $('category').value; renderCategories(); };
     async function saveCategories(categories, selected = activeCategory) {
       if (switching || navigating || pan || drag) return;
       const result = await post('/api/categories', {categories});
@@ -172,6 +183,38 @@
       state.categories = result.categories; activeCategory = selected;
       renderCategories(); update(); draw(); notice('Label types saved');
     }
+    $('directory-types-close').onclick = () => $('directory-types-dialog').close();
+    async function showDirectoryTypes() {
+      if (!state.project || busy || switching || navigating) return;
+      const dialog = $('directory-types-dialog'), list = $('directory-types-list');
+      list.replaceChildren(); $('directory-types-error').textContent = '';
+      stopArrow(); dialog.showModal();
+      try {
+        const response = await fetch('/api/project/categories');
+        const data = await response.json();
+        if (!response.ok) throw Error(data.error || 'Cannot read directory types');
+        if (!data.categories.length) {
+          const empty = document.createElement('p'); empty.textContent = 'No types yet. Create a type in Label types.'; list.append(empty);
+        }
+        for (const category of data.categories) {
+          const row = document.createElement('div'); row.className = 'row';
+          const name = document.createElement('span'); name.textContent = `${category.name} · ${category.kind === 'event' ? 'Event' : 'Entity'}`; name.style.color = category.color;
+          const add = document.createElement('button');
+          const exists = state.categories.some(c => c.id === category.id);
+          add.textContent = exists ? 'Already added' : 'Add to video'; add.disabled = exists;
+          add.onclick = async () => {
+            add.disabled = true; $('directory-types-error').textContent = '';
+            const result = await post('/api/project/categories/add', {category_id:category.id});
+            if (!result) { add.disabled = false; $('directory-types-error').textContent = 'Could not add type. Check the save error and retry.'; return; }
+            state.categories = result.categories; activeCategory = category.id;
+            renderCategories(); update(); draw();
+            dialog.close();
+          };
+          row.append(name,add); list.append(row);
+        }
+      } catch (error) { $('directory-types-error').textContent = error.message; }
+    }
+    $('directory-types').onclick = showDirectoryTypes;
     function editedCategory(id) { return {id, name:$('category-name').value.trim(), kind:$('category-kind').value, color:$('category-color').value}; }
     $('category-update').onclick = () => saveCategories(state.categories.map(c => c.id === activeCategory ? editedCategory(c.id) : c));
     $('category-add').onclick = () => {
@@ -232,7 +275,9 @@
       if (!state) return;
       const oldScale = viewScale;
       const centerX = (canvas.width/2-offsetX)/oldScale, centerY = (canvas.height/2-offsetY)/oldScale;
-      canvas.width = $('viewer').clientWidth; canvas.height = $('viewer').clientHeight;
+      const width = $('viewer').clientWidth, height = $('viewer').clientHeight;
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
       viewScale = Math.min(canvas.width/state.video.width, canvas.height/state.video.height)*zoom;
       if (zoom === 1) { offsetX=(canvas.width-state.video.width*viewScale)/2; offsetY=(canvas.height-state.video.height*viewScale)/2; }
       else { offsetX=canvas.width/2-centerX*viewScale; offsetY=canvas.height/2-centerY*viewScale; }
@@ -291,7 +336,15 @@
         drawObject({type:'box',x,y,width:Math.abs(drag.start.x-drag.end.x),height:Math.abs(drag.start.y-drag.end.y)}, '#92edba');
       }
     }
-    function update() {
+    function update(playbackOnly = false) {
+      $('objects').hidden = playbackOnly; $('event-list').hidden = playbackOnly;
+      if (playbackOnly) {
+        $('frame').value = frame; $('timeline').value = frame;
+        $('time').textContent = `${(frame/state.fps).toFixed(2)} s`;
+        $('frame-status').textContent = 'Seeking…';
+        for (const row of $('event-tracks').children) row.children[1].style.setProperty('--playhead', `${frame/Math.max(1,state.video.frame_count-1)*100}%`);
+        return;
+      }
       const label = current(), count = Object.keys(state.frames).length;
       const pendingEvents = allEvents().filter(event => event.status === 'suggested').length;
       $('progress').textContent = `${count} / ${state.video.frame_count} frames${pendingEvents ? ' · '+pendingEvents+' ◇' : ''}`;
@@ -300,6 +353,7 @@
       $('end-panel').hidden = frame !== state.video.frame_count-1 && remaining !== 0;
       $('end-summary').textContent = remaining ? `End of video. ${remaining} frame(s) still unreviewed.` : `All spatial frames reviewed.${pendingEvents ? ' Event suggestions still pending.' : ''}`;
       $('first-gap').hidden = remaining === 0;
+      $('directory-types').hidden = !state.project;
       $('queue').hidden = !state.project;
       $('next-video').hidden = !state.project;
       $('next-video').disabled = switching || !state.project || state.project.index >= state.project.count-1;
@@ -325,12 +379,12 @@
       const suggested = state.frames[String(frame)] ? 0 : state.suggestions[String(frame)]?.length || 0;
       if (suggested) { const info = document.createElement('p'); info.className = 'muted'; info.textContent = `${suggested} suggestion(s), dashed outlines`; list.append(info); }
     }
-    async function saveCurrent() {
+    async function saveCurrent(refresh = true) {
       if (!frameReady) { notice('Wait for the frame to load', true); return false; }
       const at=frame, result=await post('/api/frame',{frame:at,...current()});
       if (!result) return false;
       state.frames[String(at)]=result.label;
-      update(); draw();
+      if (refresh) { update(); draw(); }
       return true;
     }
     async function leaveFor(path, index = null) {
@@ -360,22 +414,187 @@
     $('queue').onclick=()=>leaveFor('/queue');
     $('next-video').onclick=()=>{if(state.project && state.project.index<state.project.count-1)leaveFor('/',state.project.index+1);};
     $('first-gap').onclick=()=>{for(let i=0;i<state.video.frame_count;i++)if(!state.frames[String(i)]){go(i);return;}};
-    async function go(index) {
-      if (!state || navigating || switching || busy || pan) return;
-      index = Math.max(0, Math.min(state.video.frame_count-1, Math.round(index)));
-      if (frameReady) {
-        navigating=true;
-        try { if (!await saveCurrent()) return; }
-        finally { navigating=false; }
+    // Decoded images stay bounded to roughly 48 MiB (at least two frames).
+    const frameCache = new Map();
+    let queuedFrame = null, navigationTask = null;
+    let heldArrow = null, holdTimer = null, holdAnimation = null;
+    const HOLD_DELAY = 450;
+    function cacheLimit() {
+      return Math.max(2, Math.min(16, Math.floor(48*1024*1024/(state.video.width*state.video.height*4))));
+    }
+    function loadImage(index) {
+      if (frameCache.has(index)) {
+        const entry = frameCache.get(index);
+        frameCache.delete(index); frameCache.set(index, entry);
+        return entry;
       }
-      geometryTarget = null;
-      frame = Math.max(0, Math.min(state.video.frame_count - 1, Math.round(index)));
-      drag = null; frameReady = false; update();
-      ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const sequence = ++requestId, incoming = new Image();
-      incoming.onload = () => { if (sequence !== requestId) return; image = incoming; frameReady = true; draw(); notice(''); };
-      incoming.onerror = () => { if (sequence === requestId) notice(`Cannot load frame ${frame}`, true); };
-      incoming.src = `/api/frame?index=${frame}`;
+      const incoming = new Image();
+      const promise = new Promise((resolve, reject) => {
+        incoming.onload = () => resolve(incoming);
+        incoming.onerror = () => { frameCache.delete(index); reject(Error(`Cannot load frame ${index}`)); };
+      });
+      frameCache.set(index, promise);
+      while (frameCache.size > cacheLimit()) frameCache.delete(frameCache.keys().next().value);
+      incoming.src = `/api/frame?index=${index}`;
+      return promise;
+    }
+    function go(index) {
+      if (!state || switching || heldArrow?.rolling || busy && !navigationTask || pan) return Promise.resolve(false);
+      closeTrackMenu();
+      queuedFrame = Math.max(0, Math.min(state.video.frame_count-1, Math.round(index)));
+      if (navigationTask) return navigationTask;
+      if (frameReady && queuedFrame === frame) { queuedFrame = null; return Promise.resolve(true); }
+      navigating = true;
+      navigationTask = (async () => {
+        try {
+          while (queuedFrame !== null) {
+            const target = queuedFrame; queuedFrame = null;
+            if (frameReady && target === frame) continue;
+            // Keep the current image and its annotations together until both load and save succeed.
+            const [incoming, saved] = await Promise.all([
+              loadImage(target), frameReady ? saveCurrent(false) : Promise.resolve(true)
+            ]);
+            if (!saved) { queuedFrame = null; stopArrow(); return false; }
+            geometryTarget = null; drag = null;
+            frame = target; image = incoming; frameReady = true;
+            update(); draw(); notice('');
+          }
+          return true;
+        } catch (error) { queuedFrame = null; stopArrow(); notice(error.message, true); return false; }
+        finally {
+          navigating = false; navigationTask = null;
+        }
+      })();
+      return navigationTask;
+    }
+    const pendingPlaybackFrames = new Map();
+    let playbackSaveTimer = null, playbackSaveTask = null;
+    function queuePlaybackFrame() {
+      const label = current();
+      pendingPlaybackFrames.set(frame, {frame,status:label.status,objects:label.objects.map(obj=>({...obj}))});
+      if (playbackSaveTimer === null && !playbackSaveTask) {
+        playbackSaveTimer = setTimeout(() => { playbackSaveTimer = null; flushPlaybackFrames(); }, 150);
+      }
+    }
+    function flushPlaybackFrames() {
+      if (playbackSaveTimer !== null) clearTimeout(playbackSaveTimer);
+      playbackSaveTimer = null;
+      if (playbackSaveTask) return playbackSaveTask;
+      if (!pendingPlaybackFrames.size) return Promise.resolve(true);
+      playbackSaveTask = (async () => {
+        try {
+          while (pendingPlaybackFrames.size) {
+            const batch = [...pendingPlaybackFrames.values()].slice(0,32);
+            const result = await post('/api/frames', {frames:batch});
+            if (!result) {
+              // Keep the snapshots for retry before any subsequent mutation or navigation.
+              stopArrow(); notice('Save failed. Unsaved frames are kept in memory; retry before leaving.',true);
+              return false;
+            }
+            Object.assign(state.frames,result.frames);
+            for (const row of batch) if (pendingPlaybackFrames.get(row.frame) === row) pendingPlaybackFrames.delete(row.frame);
+          }
+          return true;
+        } finally { playbackSaveTask = null; }
+      })();
+      return playbackSaveTask;
+    }
+    function stopArrow() {
+      if (holdTimer !== null) clearTimeout(holdTimer);
+      if (holdAnimation !== null) cancelAnimationFrame(holdAnimation);
+      holdTimer = null; holdAnimation = null;
+      const held = heldArrow;
+      heldArrow = null;
+      if (held) {
+        queuedFrame = null;
+        if (held.rolling && state) { update(); draw(); }
+      }
+      // Do not wait for speculative image decoding to re-enable the stopped editor.
+      const flushing = flushPlaybackFrames();
+      return flushing.then(ok => {
+        if (!heldArrow?.rolling && !navigationTask) navigating = false;
+        if (held?.rolling && state) update();
+        return ok;
+      });
+    }
+    async function fillHoldBuffer(held, at) {
+      const count = Math.min(4, cacheLimit()-1);
+      const requests = [];
+      for (let offset=1; offset<=count; offset++) {
+        if (heldArrow !== held) return;
+        const index = at+held.delta*offset;
+        if (index<0 || index>=state.video.frame_count) break;
+        requests.push(loadImage(index));
+      }
+      await Promise.allSettled(requests);
+    }
+    function prepareHeldStep(held) {
+      if (heldArrow !== held || held.preparing) return;
+      const target = Math.max(0, Math.min(state.video.frame_count-1, frame+held.delta));
+      if (target === frame) { stopArrow(); return; }
+      held.preparing = true; held.prepared = null;
+      // Prepare immediately after presenting, using the whole display interval for I/O.
+      held.preparation = (async () => {
+        try {
+          const incoming = await loadImage(target);
+          if (heldArrow !== held) return;
+          held.prepared = {target, incoming};
+          fillHoldBuffer(held, target);
+        } catch (error) {
+          if (heldArrow === held) { stopArrow(); notice(error.message, true); }
+        } finally {
+          held.preparing = false;
+          if (heldArrow !== held && !heldArrow?.rolling) navigating = false;
+        }
+      })();
+    }
+    function startArrow(event, delta) {
+      if (event.repeat || heldArrow?.code === event.code) return;
+      const previous = stopArrow();
+      const held = {code:event.code, delta, prepared:null, preparing:false, rolling:false};
+      heldArrow = held;
+      const started = performance.now()+HOLD_DELAY;
+      const frameInterval = 1000/state.fps;
+      let presented = false;
+      // A single press still performs exactly one ordinary navigation step.
+      const first = previous.then(ok => ok ? go(frame+delta) : false);
+      first.then(ok => {
+        if (heldArrow !== held || !ok) return;
+        held.firstDone = true;
+        fillHoldBuffer(held, frame);
+      });
+      let nextAt = started;
+      function present(now) {
+        holdAnimation = null;
+        if (heldArrow !== held) return;
+        if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName) || switching || document.hidden) { stopArrow(); return; }
+        if (now+0.5 >= nextAt) {
+          if (held.prepared) {
+            const {target,incoming} = held.prepared; held.prepared = null;
+            queuePlaybackFrame();
+            frame = target; image = incoming; frameReady = true; geometryTarget = null; drag = null;
+            update(true); draw(); notice('');
+            prepareHeldStep(held);
+          }
+          // Never catch up by skipping frames or presenting several in a burst.
+          if (!presented) {
+            nextAt = now+frameInterval;
+          } else {
+            nextAt += frameInterval;
+            if (nextAt <= now+0.5) nextAt = now+frameInterval;
+          }
+          presented = true;
+        }
+        if (heldArrow === held) holdAnimation = requestAnimationFrame(present);
+      }
+      holdTimer = setTimeout(async () => {
+        holdTimer = null;
+        await first;
+        if (heldArrow !== held || !held.firstDone) return;
+        held.rolling = true; navigating = true;
+        prepareHeldStep(held);
+        holdAnimation = requestAnimationFrame(present);
+      }, HOLD_DELAY);
     }
     function unreviewed(direction) {
       if (!state || switching || navigating || busy) return;
@@ -384,6 +603,7 @@
       notice('No unreviewed frame in that direction');
     }
     async function post(route, payload) {
+      if (route !== '/api/frames' && pendingPlaybackFrames.size && !await flushPlaybackFrames()) return null;
       if (busy) { notice('Wait for the current save to finish', true); return null; }
       busy = true;
       try {
@@ -423,7 +643,7 @@
     }
     function clearFrame() { setLabel('absent', []); }
     canvas.addEventListener('pointerdown', event => {
-      if (!frameReady || event.button !== 0) return;
+      if (!frameReady || navigating || switching || event.button !== 0) return;
       if (handHeld) {
         pan = {x:event.clientX, y:event.clientY, offsetX, offsetY};
         drag = null; canvas.setPointerCapture(event.pointerId); updateCursor(); return;
@@ -439,7 +659,7 @@
     canvas.addEventListener('pointerup', event => {
       if (pan) { pan=null; updateCursor(); return; }
       if (handHeld) { drag=null; draw(); return; }
-      if (!frameReady || event.button !== 0 || !inside(coords(event))) { drag=null; return; }
+      if (!frameReady || navigating || switching || event.button !== 0 || !inside(coords(event))) { drag=null; return; }
       if (mode === 'event' || mode === 'interval') {
         const p = coords(event);
         const hit = visibleEvents().filter(item => item.geometry && item.start <= frame && item.end >= frame).reverse().find(item => {
@@ -459,7 +679,7 @@
       else notice('Drag at least 2 pixels in both directions for a box', true);
     });
     canvas.addEventListener('contextmenu', event => {
-      event.preventDefault(); if (!frameReady) return;
+      event.preventDefault(); if (!frameReady || navigating || switching) return;
       const p=coords(event), objects=current().objects;
       let best=-1, distance=18/viewScale;
       objects.forEach((obj,i)=>{
@@ -500,7 +720,15 @@
       if (result) { for (let i=start;i<=end;i++) state.frames[String(i)]={status:'absent',objects:[]}; update(); draw(); notice(`${result.count} frames saved`); }
     };
     document.addEventListener('keydown', event => {
+      if (!$('track-menu').hidden) { if (event.key === 'Escape') { event.preventDefault(); closeTrackMenu(); } return; }
+      if ($('directory-types-dialog').open) return;
       if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) return;
+      if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.code)) {
+        event.preventDefault();
+        const direction = ['ArrowLeft','ArrowUp'].includes(event.code) ? -1 : 1;
+        const step = event.shiftKey || ['ArrowUp','ArrowDown'].includes(event.code) ? Number($('step').value) : 1;
+        startArrow(event, direction*step); return;
+      }
       if (event.code === 'Space') { event.preventDefault(); handHeld=true; drag=null; updateCursor(); draw(); return; }
       const key = event.key.toLowerCase();
       if (event.repeat && ['e','i','y','r'].includes(key)) return;
@@ -510,7 +738,7 @@
       if (key === '[' || key === ']') { nextEvent(key === ']' ? 1 : -1); return; }
       if (key === 'y' && selectedEvent) { changeEvent(selectedEvent,{status:'confirmed'}); return; }
       if (key === 'r' && selectedEvent) { changeEvent(selectedEvent,{status:'rejected'}); return; }
-      if (/^[1-9]$/.test(key) && state.categories[Number(key)-1]) { activeCategory = state.categories[Number(key)-1].id; renderCategories(); modeSet(categoryInfo(activeCategory).kind === 'event' ? 'event' : 'point'); return; }
+      if (/^[1-9]$/.test(key) && state.categories[Number(key)-1]) { activeCategory = state.categories[Number(key)-1].id; renderCategories(); return; }
       if (key === '?') { const help = document.querySelector('.keys'); help.open = !help.open; return; }
       if (key === 'arrowleft' || event.code === 'KeyA') { event.preventDefault(); go(frame-(event.shiftKey?Number($('step').value):1)); }
       else if (key === 'arrowright' || event.code === 'KeyD') { event.preventDefault(); go(frame+(event.shiftKey?Number($('step').value):1)); }
@@ -521,10 +749,12 @@
       else if (key === 'enter') go(frame+1); else if (key === 'delete') clearFrame();
     });
     document.addEventListener('keyup', event => {
+      if (heldArrow?.code === event.code) stopArrow();
       if (event.code === 'Space') { event.preventDefault(); handHeld=false; updateCursor(); }
     });
-    window.addEventListener('beforeunload', event => { if (intervalStart) { event.preventDefault(); event.returnValue = ''; } });
-    window.addEventListener('blur', () => { handHeld=false; updateCursor(); });
+    window.addEventListener('beforeunload', event => { if (intervalStart || pendingPlaybackFrames.size) { event.preventDefault(); event.returnValue = ''; } });
+    window.addEventListener('blur', () => { stopArrow(); handHeld=false; updateCursor(); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stopArrow(); });
     function categorySelect(id, eventsOnly = false) {
       const select = document.createElement('select');
       select.setAttribute('aria-label', 'Category');
@@ -580,7 +810,7 @@
       if (busy || navigating || switching) return;
       const event = allEvents().find(event => event.id === id);
       if (!event) return;
-      selectedEvent = id; activeCategory = event.category_id; geometryTarget = null; renderCategories(); modeSet('event');
+      selectedEvent = id; activeCategory = event.category_id; geometryTarget = null; renderCategories();
       if (frame < event.start || frame > event.end) await go(event.start);
       update(); draw();
     }
@@ -588,6 +818,44 @@
       const events = visibleEvents(), selected = events.findIndex(event => event.id === selectedEvent);
       const next = selected >= 0 ? events[selected+direction] : (direction > 0 ? events.find(event => event.start >= frame) : [...events].reverse().find(event => event.start <= frame));
       if (next) selectEvent(next.id);
+    }
+    let trackMenuAction = null;
+    function closeTrackMenu() { $('track-menu').hidden = true; trackMenuAction = null; }
+    function showTrackMenu(click, action) {
+      click.preventDefault(); click.stopPropagation();
+      if (busy || navigating || switching) return;
+      closeTrackMenu();
+      const menu = $('track-menu'); trackMenuAction = action;
+      menu.hidden = false;
+      menu.style.left = `${Math.max(0,Math.min(click.clientX || 0,(window.innerWidth || 1024)-(menu.offsetWidth || 160)))}px`;
+      menu.style.top = `${Math.max(0,Math.min(click.clientY || 0,(window.innerHeight || 768)-(menu.offsetHeight || 44)))}px`;
+      $('track-menu-delete').focus?.();
+    }
+    $('track-menu-delete').onclick = () => {
+      const action = trackMenuAction; closeTrackMenu();
+      if (action) return action();
+    };
+    document.addEventListener('pointerdown', click => { if (!$('track-menu').contains?.(click.target)) closeTrackMenu(); });
+    window.addEventListener('blur', closeTrackMenu);
+    async function deleteTrack(category) {
+      if (busy || switching || navigating || !frameReady || pan || drag) return;
+      stopArrow();
+      const result = await post('/api/categories/delete', {category_id:category.id});
+      if (!result) return;
+      applyTrackDeletion(result);
+      if (intervalStart?.category === category.id) { intervalStart = null; $('event-interval').textContent = 'Interval · I'; }
+      notice(state.project ? `Track “${category.name}” deleted from this video. Directory type kept.` : `Track “${category.name}” and all its marks deleted`);
+    }
+    function applyTrackDeletion(result) {
+      Object.assign(state, result);
+      selectedEvent = null; geometryTarget = null;
+      renderCategories(); update(); draw();
+    }
+    async function deleteSpatialMarks(category, run) {
+      if (busy || switching || navigating || !frameReady || pan || drag) return;
+      stopArrow();
+      const result = await post('/api/marks/delete', {category_id:category.id,start:run.start,end:run.end});
+      if (result) applyTrackDeletion(result);
     }
     function renderEvents() {
       const list = $('event-list'), tracks = $('event-tracks'); list.replaceChildren(); tracks.replaceChildren();
@@ -609,8 +877,9 @@
         }
         const row = document.createElement('div'); row.className = 'track';
         const title = document.createElement('span'); title.className = 'track-label'; title.style.color = category.color;
-        title.textContent = `${category.name} · ${group.length + spatial.reduce((count,run)=>count+run.end-run.start+1,0)}`; title.title = category.name;
-        title.onclick = () => { activeCategory = category.id; renderCategories(); modeSet(category.kind === 'event' ? 'event' : 'point'); };
+        title.textContent = `${category.name} · ${group.length + spatial.reduce((count,run)=>count+run.end-run.start+1,0)}`; title.title = `${category.name} · Right-click for track actions`;
+        title.oncontextmenu = click => showTrackMenu(click, () => deleteTrack(category));
+        title.onclick = () => { activeCategory = category.id; renderCategories(); };
         const lane = document.createElement('div'); lane.className = 'track-lane';
         const total = state.video.frame_count;
         lane.style.setProperty('--playhead', `${frame / Math.max(1,total-1)*100}%`);
@@ -631,7 +900,8 @@
           mark.className = `event-span ${event.status} ${selectedEvent === event.id ? 'selected' : ''}`;
           mark.style.left = `${event.start/total*100}%`; mark.style.width = `${(event.end-event.start+1)/total*100}%`;
           mark.style.color = category.color; mark.style.background = category.color;
-          mark.title = `${category.name} · ${event.start}–${event.end} · ${event.status}`;
+          mark.title = `${category.name} · ${event.start}–${event.end} · ${event.status} · Right-click for actions`;
+          mark.oncontextmenu = click => showTrackMenu(click, () => changeEvent(event.id,{status:'rejected'}));
           mark.eventId = event.id; mark.setAttribute('aria-label',mark.title); mark.onclick = () => { if (!suppressClick) selectEvent(event.id); };
           lane.append(mark);
         }
@@ -640,6 +910,7 @@
           mark.style.left = `${run.start/total*100}%`; mark.style.width = `${(run.end-run.start+1)/total*100}%`;
           mark.style.color = category.color; mark.style.background = category.color; mark.style.opacity = '.45';
           mark.title = `${category.name} · frames ${run.start}–${run.end}`;
+          mark.oncontextmenu = click => showTrackMenu(click, () => deleteSpatialMarks(category,run));
           mark.frameIndex = run.start; mark.setAttribute('aria-label',mark.title); mark.onclick = () => { if (!suppressClick) go(run.start); }; lane.append(mark);
         }
         row.append(title,lane); tracks.append(row);

@@ -1,16 +1,28 @@
 const fs=require('node:fs'), vm=require('node:vm'), assert=require('node:assert/strict');
 const elements=new Map(), calls=[], documentListeners={};
 function element(id) {
- if (!elements.has(id)) elements.set(id,{value:'1',checked:true,clientWidth:800,clientHeight:400,width:800,height:400,style:{setProperty(){}},classList:{toggle(){}},listeners:{},addEventListener(name,fn){this.listeners[name]=fn},getBoundingClientRect(){return {left:0,top:0,width:800,height:400}},getContext(){return new Proxy({},{get:()=>()=>{}})},click(){if(!this.disabled)this.onclick?.()},setAttribute(){},replaceChildren(){},append(){},setPointerCapture(){}});
+ if (!elements.has(id)) elements.set(id,{value:'1',hidden:true,checked:true,clientWidth:800,clientHeight:400,width:800,height:400,style:{setProperty(){}},classList:{toggle(){}},listeners:{},addEventListener(name,fn){this.listeners[name]=fn},getBoundingClientRect(){return {left:0,top:0,width:800,height:400}},getContext(){return new Proxy({},{get:()=>()=>{}})},click(){if(!this.disabled)this.onclick?.()},setAttribute(){},children:[],replaceChildren(){this.children=[]},append(...items){this.children.push(...items)},setPointerCapture(){},showModal(){this.open=true},close(){this.open=false}});
  return elements.get(id);
 }
 let failRoute=null;const routes=[];const location={href:''};
 const state={video:{name:'test',width:1920,height:1080,frame_count:5},fps:60,categories:[{id:'object',name:'Object',kind:'entity',color:'#ffdb66'},{id:'interaction',name:'Interaction',kind:'event',color:'#ff8b78'},{id:'arrival',name:'Arrival',kind:'event',color:'#8ee3ad'}],frames:{},suggestions:{'0':[{type:'point',x:100,y:100}],'1':[{type:'point',x:200,y:200}]}};
-const context=vm.createContext({console,location,Math,Number,Object,String,Array,Error,document:{getElementById:element,createElement:()=>element(Math.random()),addEventListener(name,fn){documentListeners[name]=fn},activeElement:{tagName:'BODY'}},window:{addEventListener(){}},ResizeObserver:class{observe(){}},Image:class{complete=true;naturalWidth=1920;set src(v){queueMicrotask(()=>this.onload())}},fetch:async(route,options)=>{if(!options)return {ok:true,json:async()=>state};const body=JSON.parse(options.body);routes.push(route);calls.push(body);if(route===failRoute)return {ok:false,json:async()=>({error:'disk full'})};return {ok:true,json:async()=>({events:body.events,categories:body.categories,label:{status:body.status,objects:body.objects}})}},queueMicrotask,confirm:()=>true});
+const context=vm.createContext({console,location,Math,Number,Object,String,Array,Error,document:{getElementById:element,createElement:()=>element(Math.random()),addEventListener(name,fn){documentListeners[name]=fn},activeElement:{tagName:'BODY'}},window:{addEventListener(){}},ResizeObserver:class{observe(){}},Image:class{complete=true;naturalWidth=1920;set src(v){queueMicrotask(()=>this.onload())}},fetch:async(route,options)=>{if(!options)return {ok:true,json:async()=>state};const body=JSON.parse(options.body);routes.push(route);calls.push(body);if(route===failRoute)return {ok:false,json:async()=>({error:'disk full'})};return {ok:true,json:async()=>({frames:body.frames?Object.fromEntries(body.frames.map(row=>[String(row.frame),{status:row.status,objects:row.objects}])):undefined,events:body.events,categories:body.categories,label:{status:body.status,objects:body.objects}})}},queueMicrotask,confirm:()=>true});
 const html=fs.readFileSync('src/video_annotating_interface/static/index.html','utf8');vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
  await tick();
+ assert.equal(vm.runInContext('mode',context),'point','default tool is Point');
+ element('category').value='interaction';element('category').onchange();
+ assert.equal(vm.runInContext('mode',context),'point','choosing an event type keeps Point');
+ vm.runInContext("modeSet('box')",context);
+ element('category').value='arrival';element('category').onchange();
+ assert.equal(vm.runInContext('mode',context),'box','category dropdown keeps last tool');
+ const trackTitle=element('event-tracks').children[1].children[0];trackTitle.onclick();
+ assert.equal(vm.runInContext('mode',context),'box','track title keeps last tool');
+ documentListeners.keydown({code:'Digit1',key:'1',preventDefault(){}});
+ assert.equal(vm.runInContext('mode',context),'box','numeric category shortcut keeps last tool');
+ vm.runInContext("activeCategory='object';modeSet('point');renderCategories()",context);
+
  assert.equal(vm.runInContext('viewScale*state.video.height<=canvas.height',context),true,'whole frame fits');
  const before=vm.runInContext('coords({clientX:300,clientY:200})',context);
  let prevented=false;element('canvas').listeners.wheel({deltaY:-300,clientX:300,clientY:200,preventDefault(){prevented=true}});
@@ -96,6 +108,28 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  vm.runInContext("state.events=[];state.event_suggestions=[{id:'hit_1',category_id:'interaction',start:1,end:3,status:'suggested'}];activeCategory='interaction';renderCategories()",context);
  await vm.runInContext('go(1)',context);await tick();
  assert.equal(vm.runInContext('state.events.length',context),0,'navigation does not confirm events');
+ vm.runInContext("modeSet('box')",context);
+ await vm.runInContext("selectEvent('hit_1')",context);
+ assert.equal(vm.runInContext('mode',context),'box','selecting a temporal event keeps last tool');
+ vm.runInContext("modeSet('point')",context);
+
+ const eventMark=element('event-tracks').children.flatMap(row=>row.children[1].children).find(mark=>mark.eventId==='hit_1');
+ assert(eventMark,'temporal suggestion appears on timeline');
+ let contextPrevented=false, propagationStopped=false;
+ eventMark.oncontextmenu({preventDefault(){contextPrevented=true},stopPropagation(){propagationStopped=true}});
+ assert.equal(vm.runInContext('allEvents().length',context),1,'right click only opens a menu');
+ assert.equal(element('track-menu').hidden,false);
+ documentListeners.keydown({key:'Escape',preventDefault(){}});
+ assert.equal(element('track-menu').hidden,true,'Escape dismisses the menu without deleting');
+ assert.equal(vm.runInContext('allEvents().length',context),1);
+ eventMark.oncontextmenu({preventDefault(){},stopPropagation(){}});
+ await element('track-menu-delete').onclick();
+ await tick();
+ assert(contextPrevented && propagationStopped,'right click suppresses browser menu and lane actions');
+ assert.equal(vm.runInContext('allEvents().length',context),0,'right click removes temporal mark');
+ assert.equal(calls.at(-1).events[0].status,'rejected','rejected prediction stays rejected on resume');
+ vm.runInContext('state.events=[];renderEvents()',context);
+
  await vm.runInContext("changeEvent('hit_1',{category_id:'arrival',end:4})",context);
  assert.equal(calls.at(-1).events[0].status,'suggested','editing preserves pending review');
  assert.equal(calls.at(-1).events[0].category_id,'arrival');
@@ -144,5 +178,206 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  assert.equal(vm.runInContext('state.categories[0].name',context),'Door opened');
  element('category-remove').onclick();await tick();
  assert.equal(vm.runInContext('state.categories.length',context),0,'last unused type can be removed');
+ // Track context menu deletes its catalog entry only after a successful atomic response.
+ vm.runInContext("state.categories=[{id:'object',name:'Object',kind:'entity',color:'#ffdb66'}];state.frames={'0':{status:'annotated',objects:[{type:'point',x:1,y:2,category_id:'object'}]}};state.suggestions={};state.events=[];state.event_suggestions=[];renderEvents()",context);
+ const title=element('event-tracks').children[0].children[0];
+ const spatialMark=element('event-tracks').children[0].children[1].children[0];
+ failRoute='/api/categories/delete';
+ title.oncontextmenu({preventDefault(){},stopPropagation(){}});await element('track-menu-delete').onclick();await tick();
+ assert.equal(vm.runInContext('state.categories.length',context),1,'failed track deletion keeps catalog and marks');
+ assert.equal(routes.at(-1),'/api/categories/delete');
+ const originalFetch=context.fetch;
+ context.fetch=async(route,options)=>{
+   if (route==='/api/categories/delete'||route==='/api/marks/delete') {
+     const result=JSON.parse(JSON.stringify(state));
+     result.frames={'0':{status:'absent',objects:[]}};
+     if(route==='/api/categories/delete')result.categories=[];
+     return {ok:true,json:async()=>result};
+   }
+   return originalFetch(route,options);
+ };
+ failRoute=null;
+ spatialMark.oncontextmenu({preventDefault(){},stopPropagation(){}});await element('track-menu-delete').onclick();await tick();
+ assert.equal(vm.runInContext('state.frames["0"].status',context),'absent','spatial context deletion updates reviewed frame');
+ assert.equal(vm.runInContext('state.categories.length',context),1,'deleting a mark keeps its type');
+ title.oncontextmenu({preventDefault(){},stopPropagation(){}});await element('track-menu-delete').onclick();await tick();
+ assert.equal(vm.runInContext('state.categories.length',context),0,'track context deletion removes type');
+ context.fetch=originalFetch;
+ // Directory catalog browsing does not attach every global type to a video.
+ vm.runInContext('state.project={index:1,count:2};state.categories=[];update()',context);
+ assert.equal(element('directory-types').hidden,false);
+ const catalog=[{id:'dir_event',name:'Shared event',kind:'event',color:'#123456'},{id:'dir_object',name:'Shared object',kind:'entity',color:'#654321'}];
+ const savedFetch=context.fetch;
+ context.fetch=async(route,options)=>{
+   if(route==='/api/project/categories') return {ok:true,json:async()=>({categories:catalog})};
+   return savedFetch(route,options);
+ };
+ await vm.runInContext('showDirectoryTypes()',context);
+ assert.equal(element('directory-types-dialog').open,true);
+ assert.equal(element('directory-types-list').children.length,2);
+ assert.equal(vm.runInContext('state.categories.length',context),0,'browsing catalog must not create video tracks');
+ failRoute='/api/project/categories/add';
+ const addShared=element('directory-types-list').children[0].children[1];
+ await addShared.onclick();
+ assert.equal(vm.runInContext('state.categories.length',context),0,'failed attach keeps video types unchanged');
+ assert.equal(addShared.disabled,false,'failed attach can be retried');
+ failRoute=null;
+ context.fetch=async(route,options)=>{
+   if(route==='/api/project/categories/add')return {ok:true,json:async()=>({categories:[catalog[0]]})};
+   return savedFetch(route,options);
+ };
+ vm.runInContext("modeSet('box')",context);
+ await addShared.onclick();
+ assert.equal(vm.runInContext('mode',context),'box','adding directory type keeps last tool');
+ assert.equal(vm.runInContext('activeCategory',context),'dir_event');
+ assert.equal(vm.runInContext('state.categories.length',context),1,'only the chosen directory type becomes a track');
+ assert.equal(element('directory-types-dialog').open,false);
+ context.fetch=savedFetch;
+ vm.runInContext('state.project=null;update()',context);
+ assert.equal(element('directory-types').hidden,true,'single-video mode has no catalog button');
+ // No-op navigation must not leave a resolved task blocking subsequent steps.
+ const initialFrame=vm.runInContext('frame',context);
+ await vm.runInContext('go(frame)',context);
+ await vm.runInContext(`go(${initialFrame===0?1:0})`,context);
+ assert.notEqual(vm.runInContext('frame',context),initialFrame);
+ // A slow image leaves the previous frame and label visible until replacement is ready.
+ const delayedImages=[];
+ context.Image=class{complete=true;naturalWidth=1920;set src(value){delayedImages.push(this);}};
+ vm.runInContext('frameCache.clear()',context);
+ const visibleBefore=vm.runInContext('frame',context);
+ const target=visibleBefore===4?3:4;
+ const saveCountBeforeLoad=calls.length;
+ const moving=vm.runInContext(`go(${target})`,context);
+ await tick();
+ assert.equal(vm.runInContext('frame',context),visibleBefore,'frame metadata stays with displayed image');
+ assert.equal(vm.runInContext('frameReady',context),true,'old image stays drawable during loading');
+ assert.equal(vm.runInContext('navigating',context),true);
+ assert.equal(calls.length,saveCountBeforeLoad+1,'save starts while image load is still pending');
+ delayedImages.shift().onload(); await moving;
+ assert.equal(vm.runInContext('frame',context),target);
+ vm.runInContext('frameCache.clear()',context);
+ failRoute='/api/frame';
+ const failedMove=vm.runInContext(`go(${visibleBefore})`,context);
+ await tick();delayedImages.shift().onload();
+ assert.equal(await failedMove,false);
+ assert.equal(vm.runInContext('frame',context),target,'parallel image load must not bypass failed save');
+ assert.equal(vm.runInContext('frameReady',context),true,'failed save keeps existing image drawable');
+ failRoute=null;
+ // Use a deterministic clock to check hold delay, OS-repeat suppression and fixed speed.
+ context.Image=class{complete=true;naturalWidth=1920;set src(value){queueMicrotask(()=>this.onload());}};
+ let now=0, timerId=0; const timers=new Map();
+ context.performance={now:()=>now};
+ context.setTimeout=(fn,delay)=>{const id=++timerId;timers.set(id,{fn,at:now+delay});return id;};
+ context.clearTimeout=id=>timers.delete(id);
+ context.requestAnimationFrame=fn=>context.setTimeout(()=>fn(now),1000/60);
+ context.cancelAnimationFrame=id=>timers.delete(id);
+ async function advance(ms){const end=now+ms;while(true){const next=[...timers].sort((a,b)=>a[1].at-b[1].at)[0];if(!next||next[1].at>end)break;now=next[1].at;timers.delete(next[0]);next[1].fn();await tick();await tick();}now=end;}
+ vm.runInContext('state.video.frame_count=500; state.fps=30; frameCache.clear()',context);
+ await vm.runInContext('go(20)',context);await tick();
+ const down=repeat=>documentListeners.keydown({code:'ArrowRight',key:'ArrowRight',repeat,shiftKey:false,preventDefault(){}});
+ down(false);await tick();await tick();
+ assert.equal(vm.runInContext('frame',context),21,'single arrow press advances one frame');
+ await advance(449);down(true);await tick();
+ assert.equal(vm.runInContext('frame',context),21,'OS repeat does not control hold cadence');
+ await advance(1001);
+ const heldAt=vm.runInContext('frame',context);
+ assert(heldAt>=51 && heldAt<=52,'presentation stays at 30 steps per second with display refresh rounding');
+ documentListeners.keyup({code:'ArrowRight',preventDefault(){}});
+ await advance(2000);
+ assert.equal(vm.runInContext('frame',context),heldAt,'keyup stops movement');
+ assert.equal(timers.size,0,'keyup cancels scheduled repeats');
+ // Variable I/O latency must not leak into presentation intervals or skip frames.
+ const originalUpdate=vm.runInContext('update',context), presentations=[];
+ context.recordPresentation=()=>presentations.push({at:now,frame:vm.runInContext('frame',context)});
+ context.originalUpdate=originalUpdate;
+ vm.runInContext('update=function(playbackOnly=false){if(playbackOnly)recordPresentation();return originalUpdate(playbackOnly)}',context);
+ let latency=0;
+ context.Image=class{complete=true;naturalWidth=1920;set src(value){context.setTimeout(()=>this.onload(),[10,30,45][latency++%3]);}};
+ const ioFetch=context.fetch;
+ context.fetch=(route,options)=>options?new Promise(resolve=>context.setTimeout(()=>resolve(ioFetch(route,options)),[5,25,45][latency++%3])):ioFetch(route,options);
+ vm.runInContext('frameCache.clear()',context);
+ down(false);await tick();await advance(440);
+ assert.equal(presentations.length,0,'short press phase does not enter continuous presentation');
+ await advance(1150);
+ assert(presentations.length>=28,'pipeline sustains near 30 fps with variable sub-frame I/O latency');
+ for(let i=1;i<presentations.length;i++){
+   assert.equal(presentations[i].frame,presentations[i-1].frame+1,'held playback never jumps over a frame');
+   assert(Math.abs(presentations[i].at-presentations[i-1].at-1000/30)<1,'prepared frames present at uniform intervals: '+JSON.stringify(presentations));
+ }
+ documentListeners.keyup({code:'ArrowRight',preventDefault(){}});
+ const stoppedFrame=vm.runInContext('frame',context);
+ await advance(200);
+ assert.equal(vm.runInContext('frame',context),stoppedFrame,'in-flight preparation does not advance after release');
+ context.fetch=ioFetch;
+ context.Image=class{complete=true;naturalWidth=1920;set src(value){queueMicrotask(()=>this.onload());}};
+ // Buffer starvation must pause instead of jumping ahead or bursting to catch up.
+ const frozenImages=[];
+ context.Image=class{complete=true;naturalWidth=1920;set src(value){frozenImages.push(this);}};
+ vm.runInContext('frameCache.clear()',context);
+ down(false);await tick();
+ frozenImages.shift().onload();await tick();await tick();
+ const beforeStall=vm.runInContext('frame',context);
+ await advance(800);
+ assert.equal(vm.runInContext('frame',context),beforeStall,'missing prepared frame keeps the current image');
+ for(const incoming of frozenImages.splice(0))incoming.onload();await tick();await tick();
+ await advance(70);
+ assert(vm.runInContext('frame',context)>beforeStall && vm.runInContext('frame',context)<=beforeStall+3,'refill resumes at the normal 30 fps cadence without catch-up');
+ documentListeners.keyup({code:'ArrowRight',preventDefault(){}});
+ for(const incoming of frozenImages.splice(0))incoming.onload();await tick();
+ // A short press must not save the newly displayed frame merely to prepare a hold.
+ context.Image=class{complete=true;naturalWidth=1920;set src(value){queueMicrotask(()=>this.onload());}};
+ const shortPressSaves=calls.length;
+ down(false);await tick();await tick();
+ const shortPressFrame=vm.runInContext('frame',context);
+ documentListeners.keyup({code:'ArrowRight',preventDefault(){}});
+ await advance(500);
+ assert.equal(calls.length,shortPressSaves+1,'single press saves only the outgoing frame');
+ assert.equal(vm.runInContext(`Boolean(state.frames['${shortPressFrame}'])`,context),false,'single press leaves its destination unreviewed');
+ down(false);await tick();await tick();
+ const beforeSaveFailure=vm.runInContext('frame',context);
+ failRoute='/api/frames';
+ await advance(700);
+ assert.equal(vm.runInContext('heldArrow',context),null,'failed preparation save stops playback');
+ assert(vm.runInContext('pendingPlaybackFrames.size',context)>0,'failed playback save retains snapshots for retry');
+ const failedAt=vm.runInContext('frame',context);
+ await advance(200);
+ assert.equal(vm.runInContext('frame',context),failedAt,'failed save stops any further movement');
+ failRoute=null;
+ await vm.runInContext('flushPlaybackFrames()',context);
+ await tick();
+ // Slow disk flushes must no longer stall presentation or create timing jitter.
+ presentations.length=0;
+ const fastFetch=context.fetch;
+ let batchWrites=0;
+ context.fetch=(route,options)=>{
+   if(route==='/api/frames') {batchWrites++;return new Promise(resolve=>context.setTimeout(()=>resolve(fastFetch(route,options)),250));}
+   return fastFetch(route,options);
+ };
+ down(false);await tick();await tick();
+ await advance(1500);
+ assert(presentations.length>=29,'250 ms disk saves must not halve the 30 fps display rate');
+ for(let i=1;i<presentations.length;i++){
+   assert.equal(presentations[i].frame,presentations[i-1].frame+1);
+   assert(Math.abs(presentations[i].at-presentations[i-1].at-1000/30)<1,'disk delay must not affect presentation cadence');
+ }
+ assert(batchWrites<presentations.length/2,'displayed frames are saved in batches, not one disk write per frame');
+ documentListeners.keyup({code:'ArrowRight',preventDefault(){}});
+ const afterRelease=vm.runInContext('frame',context);
+ await advance(1000);
+ assert.equal(vm.runInContext('frame',context),afterRelease);
+ assert.equal(vm.runInContext('pendingPlaybackFrames.size',context),0,'release flushes every outgoing snapshot');
+ for(const shown of presentations.slice(0,-1))assert(vm.runInContext(`Boolean(state.frames['${shown.frame}'])`,context),'every displayed outgoing frame is persisted');
+ context.fetch=fastFetch;
+ // Playback cadence follows the source FPS, including fractional frame rates.
+ for(const fps of [24,25,29.97,60]) {
+   vm.runInContext(`state.fps=${fps};state.video.frame_count=1000;frameCache.clear()`,context);
+   presentations.length=0;
+   down(false);await tick();await tick();
+   await advance(1450);
+   assert(Math.abs(presentations.length-fps)<=1,`one second of held playback follows source FPS ${fps}: ${presentations.length}`);
+   for(let i=1;i<presentations.length;i++)assert.equal(presentations[i].frame,presentations[i-1].frame+1);
+   documentListeners.keyup({code:'ArrowRight',preventDefault(){}});
+   await advance(200);
+ }
  console.log('UI behavior checks passed');
 })().catch(error=>{console.error(error);process.exitCode=1});

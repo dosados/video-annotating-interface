@@ -111,10 +111,9 @@ Use **Exit application / Завершить** on any page to stop the local appl
 The editor saves the displayed frame before exiting; if saving fails, it stays open.
 After shutdown, close the browser tab. Simply closing the tab leaves the application running.
 
-### Experimental compact event editor
+### Compact event editor
 
-On branch `feature/compact-event-editor`, the label selector, frame objects and
-category timeline use the same names and colors. Change a label directly in its
+The label selector, frame objects and category timeline use the same names and colors. Change a label directly in its
 annotation row. The tool selector offers Point, Box, Event and Interval; less-used
 review, view and numeric controls are folded away. Existing keyboard shortcuts
 are preserved (including Space + drag for pan).
@@ -128,3 +127,24 @@ are preserved (including Space + drag for pan).
 - **?** opens shortcut help. Event review is independent from spatial frame review.
 
 Temporal predictions use suggestions-v3; see [formats](docs/formats.md#temporal-events-and-v3-experimental-event-editor).
+
+
+### Directory types, seeking and preview
+
+Directory projects save reusable label types in `annotation-project.json` in the
+output directory. **Types in directory / Типы директории** lists the catalog and
+adds a selected type to the current video. A fresh video has no catalog-only
+tracks; opening existing output restores that video's selected types. Right-click
+a track or timeline mark and choose **Удалить** to remove it from this video.
+The reusable directory definition and other videos are preserved.
+
+Held arrow keys start after 450 ms and follow the source video's FPS; single
+presses keep their existing frame steps. Decoded lookahead and atomic batched
+saving keep image presentation independent from disk writes. Releasing the key
+stops playback and flushes pending saves. If saving fails, keep the tab open and
+retry; unsaved snapshots remain in memory. **Exit application / Завершить** waits
+for saving before stopping the server.
+
+**Preview queue** shows thumbnails and filenames in a height-limited scrollable
+list. File choosers hide dot-prefixed files and folders unless **Show hidden files /
+Показывать скрытые** is checked.

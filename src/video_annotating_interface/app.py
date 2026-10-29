@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import webbrowser
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -164,8 +165,21 @@ class AnnotationStore:
         }
         self.lock = threading.RLock()
         self.next_frame = -1
+        self.frame_cache: OrderedDict[int, bytes] = OrderedDict()
+        self.frame_cache_bytes = 0
+        self.decode_lock = threading.RLock()
+        self.frame_readers = threading.Condition()
+        self.active_frame_readers = 0
+        self.frames_closed = False
+        self.frame_cache_lock = threading.RLock()
+        self.prefetch_wakeup = threading.Event()
+        self.prefetch_stop = threading.Event()
+        self.prefetch_thread = None
+        self.prefetch_request = None
+        self.last_requested_frame = None
         self.labels: dict[str, dict] = {}
         self.format = FORMAT
+        self.deleted_categories = set()
         self.events = []
         self.event_suggestions = []
         self.categories = [dict(category) for category in DEFAULT_CATEGORIES]
@@ -179,9 +193,19 @@ class AnnotationStore:
                     or saved.get("video") != self.identity
                 ):
                     raise ValueError("Output file has a different format or video identity")
+                deleted = saved.get("deleted_categories", [])
+                if not isinstance(deleted, list) or any(
+                    not isinstance(key, str)
+                    or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}", key)
+                    for key in deleted
+                ):
+                    raise ValueError("Invalid deleted category ids")
+                self.deleted_categories = set(deleted)
                 self.format = saved["format"]
                 if self.format in (FORMAT_V2, FORMAT_V3):
                     self.categories = validate_categories(saved.get("categories"))
+                if self.deleted_categories & {c["id"] for c in self.categories}:
+                    raise ValueError("Deleted types must not remain in the catalog")
                 if not isinstance(saved.get("frames"), dict):
                     raise ValueError("Output frames must be an object")
                 for key, label in saved["frames"].items():
@@ -200,6 +224,23 @@ class AnnotationStore:
                 self.last_annotated_frame = self._frame(saved["last_annotated_frame"])
             self.suggestions = self._read_suggestions(suggestions) if suggestions else {}
             self._ensure_legacy_category()
+            if self.deleted_categories:
+                self.categories = [
+                    c for c in self.categories if c["id"] not in self.deleted_categories
+                ]
+                self.suggestions = {
+                    key: [
+                        o
+                        for o in objects
+                        if o.get("category_id", "object") not in self.deleted_categories
+                    ]
+                    for key, objects in self.suggestions.items()
+                }
+                self.event_suggestions = [
+                    e
+                    for e in self.event_suggestions
+                    if e["category_id"] not in self.deleted_categories
+                ]
             if self.format in (FORMAT_V2, FORMAT_V3):
                 self._upgrade()
         except Exception:
@@ -336,15 +377,103 @@ class AnnotationStore:
                 raise ValueError("Categories used by events must remain event types")
             if not used <= ids:
                 raise ValueError("Cannot remove label types used by annotations or suggestions")
-            previous = self.categories, self.format, self.labels, self.suggestions
+            previous = (
+                self.categories,
+                self.format,
+                self.labels,
+                self.suggestions,
+                self.deleted_categories,
+            )
+            self.deleted_categories = self.deleted_categories - ids
             self.categories = clean
             self._upgrade()
             try:
                 self._write()
             except OSError:
-                self.categories, self.format, self.labels, self.suggestions = previous
+                (
+                    self.categories,
+                    self.format,
+                    self.labels,
+                    self.suggestions,
+                    self.deleted_categories,
+                ) = previous
                 raise
             return self.categories
+
+    def delete_category(self, category_id):
+        """Remove a track and its labels in one durable transaction."""
+        with self.lock:
+            if not isinstance(category_id, str) or category_id not in {
+                c["id"] for c in self.categories
+            }:
+                raise ValueError("Unknown label type")
+            previous = (
+                self.categories,
+                self.labels,
+                self.suggestions,
+                self.events,
+                self.event_suggestions,
+                self.deleted_categories,
+                self.format,
+            )
+            self._upgrade()
+            self.labels = {
+                key: {"status": "annotated" if objects else "absent", "objects": objects}
+                for key, label in self.labels.items()
+                for objects in [[o for o in label["objects"] if o["category_id"] != category_id]]
+            }
+            self.suggestions = {
+                key: [o for o in objects if o["category_id"] != category_id]
+                for key, objects in self.suggestions.items()
+            }
+            self.events = [e for e in self.events if e["category_id"] != category_id]
+            self.event_suggestions = [
+                e for e in self.event_suggestions if e["category_id"] != category_id
+            ]
+            self.categories = [c for c in self.categories if c["id"] != category_id]
+            self.deleted_categories = self.deleted_categories | {category_id}
+            try:
+                self._write()
+            except OSError:
+                (
+                    self.categories,
+                    self.labels,
+                    self.suggestions,
+                    self.events,
+                    self.event_suggestions,
+                    self.deleted_categories,
+                    self.format,
+                ) = previous
+                raise
+            return self.state()
+
+    def delete_spatial_marks(self, category_id, start, end):
+        """Remove only this type from a displayed spatial run, preserving other types."""
+        start, end = self._frame(start), self._frame(end)
+        with self.lock:
+            if start > end or category_id not in {c["id"] for c in self.categories}:
+                raise ValueError("Invalid spatial mark range or type")
+            previous = self.labels, self.format, self.suggestions, self.categories
+            self._upgrade()
+            keys = set(self.labels) | set(self.suggestions)
+            for key in keys:
+                if not start <= int(key) <= end:
+                    continue
+                objects = (
+                    self.labels[key]["objects"] if key in self.labels else self.suggestions[key]
+                )
+                remaining = [o for o in objects if o["category_id"] != category_id]
+                if len(remaining) != len(objects):
+                    self.labels[key] = {
+                        "status": "annotated" if remaining else "absent",
+                        "objects": remaining,
+                    }
+            try:
+                self._write()
+            except OSError:
+                self.labels, self.format, self.suggestions, self.categories = previous
+                raise
+            return self.state()
 
     def state(self) -> dict:
         with self.lock:
@@ -416,19 +545,108 @@ class AnnotationStore:
                 raise
             return self.labels[key]
 
-    def frame_jpeg(self, frame: int) -> bytes:
-        self._frame(frame)
-        with self.lock:
-            if frame != self.next_frame:
-                self.capture.set(cv2.CAP_PROP_POS_FRAMES, frame)
-            ok, image = self.capture.read()
-            if not ok:
-                raise ValueError(f"Cannot decode frame {frame}")
-            self.next_frame = frame + 1
+    def _cached_frame(self, frame):
+        with self.frame_cache_lock:
+            data = self.frame_cache.get(frame)
+            if data is not None:
+                self.frame_cache.move_to_end(frame)
+            return data
+
+    def _cache_frame(self, frame, data):
+        with self.frame_cache_lock:
+            if self.prefetch_stop.is_set():
+                return
+            limit = 32 * 1024 * 1024
+            if len(data) > limit:
+                return
+            previous = self.frame_cache.pop(frame, None)
+            self.frame_cache_bytes -= len(previous) if previous is not None else 0
+            self.frame_cache[frame] = data
+            self.frame_cache_bytes += len(data)
+            while self.frame_cache_bytes > limit or len(self.frame_cache) > 96:
+                _, removed = self.frame_cache.popitem(last=False)
+                self.frame_cache_bytes -= len(removed)
+
+    @staticmethod
+    def _encode_frame(image):
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 94])
         if not ok:
             raise ValueError("Cannot encode frame")
         return encoded.tobytes()
+
+    def _schedule_prefetch(self, frame):
+        with self.frame_cache_lock:
+            if self.prefetch_stop.is_set():
+                return
+            previous = self.last_requested_frame
+            direction = -1 if previous is not None and frame < previous else 1
+            self.last_requested_frame = frame
+            self.prefetch_request = (frame, direction)
+            if self.prefetch_thread is None:
+                self.prefetch_thread = threading.Thread(target=self._prefetch_loop, daemon=True)
+                self.prefetch_thread.start()
+            self.prefetch_wakeup.set()
+
+    def _prefetch_loop(self):
+        # This decoder never moves the foreground decoder's position or takes the annotation lock.
+        capture = cv2.VideoCapture(str(self.video))
+        next_frame = -1
+        try:
+            while not self.prefetch_stop.is_set():
+                self.prefetch_wakeup.wait()
+                self.prefetch_wakeup.clear()
+                if self.prefetch_stop.is_set():
+                    return
+                with self.frame_cache_lock:
+                    at, direction = self.prefetch_request
+                indices = [
+                    at + direction * i for i in range(1, 17) if 0 <= at + direction * i < self.count
+                ]
+                if not indices:
+                    continue
+                # Reverse seeking decodes a contiguous window forward once, rather than
+                # repeatedly seeking to a keyframe for every preceding frame.
+                low, high = min(indices), max(indices)
+                for index in sorted(indices):
+                    if self.prefetch_stop.is_set():
+                        return
+                    with self.frame_cache_lock:
+                        latest, latest_direction = self.prefetch_request
+                    if latest_direction != direction or not low - 1 <= latest <= high + 1:
+                        break
+                    if self._cached_frame(index) is not None:
+                        continue
+                    try:
+                        if index != next_frame:
+                            capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+                        ok, image = capture.read()
+                        next_frame = index + 1
+                        if not ok:
+                            break
+                        self._cache_frame(index, self._encode_frame(image))
+                    except (cv2.error, ValueError):
+                        break
+        finally:
+            capture.release()
+
+    def frame_jpeg(self, frame: int) -> bytes:
+        self._frame(frame)
+        data = self._cached_frame(frame)
+        if data is None:
+            with self.decode_lock:
+                # Prefetch may finish while another foreground request is decoding.
+                data = self._cached_frame(frame)
+                if data is None:
+                    if frame != self.next_frame:
+                        self.capture.set(cv2.CAP_PROP_POS_FRAMES, frame)
+                    ok, image = self.capture.read()
+                    if not ok:
+                        raise ValueError(f"Cannot decode frame {frame}")
+                    self.next_frame = frame + 1
+                    data = self._encode_frame(image)
+                    self._cache_frame(frame, data)
+        self._schedule_prefetch(frame)
+        return data
 
     def _write(self) -> None:
         self.output.parent.mkdir(parents=True, exist_ok=True)
@@ -444,6 +662,11 @@ class AnnotationStore:
                     ),
                     "video": self.identity,
                     "fps": self.fps,
+                    **(
+                        {"deleted_categories": sorted(self.deleted_categories)}
+                        if self.deleted_categories
+                        else {}
+                    ),
                     "frames": self.labels,
                     **({"events": self.events} if self.format == FORMAT_V3 else {}),
                     "last_annotated_frame": self.last_annotated_frame,
@@ -456,6 +679,65 @@ class AnnotationStore:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, self.output)
+
+    def set_frames(self, frames):
+        """Save only displayed outgoing frames as one atomic batch."""
+        if not isinstance(frames, list) or not 1 <= len(frames) <= 32:
+            raise ValueError("A batch needs 1–32 frames")
+        with self.lock:
+            clean = []
+            for row in frames:
+                if not isinstance(row, dict) or set(row) != {"frame", "status", "objects"}:
+                    raise ValueError("Each batch frame needs frame, status and objects")
+                clean.append(
+                    (self._frame(row["frame"]), self._label(row["status"], row["objects"]))
+                )
+            if len({at for at, _ in clean}) != len(clean):
+                raise ValueError("Duplicate batch frame")
+            previous = (
+                self.format,
+                self.labels,
+                self.suggestions,
+                self.last_annotated_frame,
+                self.categories,
+            )
+            objects = [obj for _, label in clean for obj in label["objects"]]
+            if any("category_id" not in obj for obj in objects) and not any(
+                c["id"] == "object" for c in self.categories
+            ):
+                self.categories = [*self.categories, dict(LEGACY_CATEGORY)]
+            typed = self.format in (FORMAT_V2, FORMAT_V3) or any(
+                "category_id" in obj for obj in objects
+            )
+            if typed:
+                self._upgrade()
+            else:
+                self.labels = dict(self.labels)
+            result = {}
+            for at, label in clean:
+                if typed:
+                    label = {
+                        **label,
+                        "objects": [
+                            {**obj, "category_id": obj.get("category_id", "object")}
+                            for obj in label["objects"]
+                        ],
+                    }
+                result[str(at)] = label
+            self.labels.update(result)
+            self.last_annotated_frame = clean[-1][0]
+            try:
+                self._write()
+            except OSError:
+                (
+                    self.format,
+                    self.labels,
+                    self.suggestions,
+                    self.last_annotated_frame,
+                    self.categories,
+                ) = previous
+                raise
+            return result
 
     def set_frame(self, frame: int, status: str, objects: list) -> dict:
         key = str(self._frame(frame))
@@ -537,11 +819,36 @@ class AnnotationStore:
                 raise
         return end - start + 1
 
+    def begin_frame_read(self):
+        with self.frame_readers:
+            if self.frames_closed:
+                raise ValueError("Video session is closed")
+            self.active_frame_readers += 1
+
+    def end_frame_read(self):
+        with self.frame_readers:
+            self.active_frame_readers -= 1
+            self.frame_readers.notify_all()
+
     def close(self) -> None:
+        if hasattr(self, "frame_readers"):
+            with self.frame_readers:
+                self.frames_closed = True
+                while self.active_frame_readers:
+                    self.frame_readers.wait()
+        if hasattr(self, "prefetch_stop"):
+            self.prefetch_stop.set()
+            self.prefetch_wakeup.set()
+            if self.prefetch_thread is not None:
+                self.prefetch_thread.join()
         self.capture.release()
+        if hasattr(self, "frame_cache"):
+            with self.frame_cache_lock:
+                self.frame_cache.clear()
+                self.frame_cache_bytes = 0
 
 
-def list_files(path: Path, kind: str) -> dict:
+def list_files(path: Path, kind: str, show_hidden: bool = False) -> dict:
     """List local folders for the browser's input/output chooser."""
     directory = path.expanduser().resolve(strict=True)
     if not directory.is_dir():
@@ -549,6 +856,8 @@ def list_files(path: Path, kind: str) -> dict:
     extensions = {".mp4", ".mov", ".mkv", ".avi", ".webm"} if kind == "video" else {".json"}
     entries = []
     for item in directory.iterdir():
+        if not show_hidden and item.name.startswith("."):
+            continue
         try:
             is_directory = item.is_dir()
             if is_directory or item.suffix.lower() in extensions:
@@ -557,6 +866,35 @@ def list_files(path: Path, kind: str) -> dict:
             continue
     entries.sort(key=lambda row: (not row["directory"], row["name"].lower()))
     return {"path": str(directory), "parent": str(directory.parent), "entries": entries}
+
+
+def preview_jpeg(path: Path) -> bytes:
+    """Decode a small first-frame preview without opening an annotation session."""
+    source = path.expanduser().resolve(strict=True)
+    if not source.is_file() or source.suffix.lower() not in {
+        ".mp4",
+        ".mov",
+        ".mkv",
+        ".avi",
+        ".webm",
+    }:
+        raise ValueError("Choose a supported video file")
+    capture = cv2.VideoCapture(str(source))
+    try:
+        ok, frame = capture.read()
+        if not ok:
+            raise ValueError("Cannot decode video preview")
+        height, width = frame.shape[:2]
+        scale = min(320 / width, 180 / height, 1)
+        if scale < 1:
+            size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            frame = cv2.resize(frame, size)
+        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if not ok:
+            raise ValueError("Cannot encode video preview")
+        return encoded.tobytes()
+    finally:
+        capture.release()
 
 
 def open_store(video: str, output: str, suggestions: str | None = None) -> AnnotationStore:
@@ -630,7 +968,21 @@ def validate_project(project: object, path: Path) -> dict:
     temporary_outputs = {value.with_name(value.name + ".tmp").resolve() for value in outputs}
     if (outputs | temporary_outputs) & (inputs | reserved) or reserved & inputs:
         raise ValueError("Project and output paths must differ from all inputs")
-    return {"format": PROJECT_FORMAT, "items": clean, "index": index}
+    return {
+        "format": PROJECT_FORMAT,
+        "items": clean,
+        "index": index,
+        "categories": validate_categories(project.get("categories", [])),
+    }
+
+
+def catalog_with_categories(project: dict, categories: list, *, replace=False) -> dict:
+    """Catalog entries are independent from each video's selected label types."""
+    catalog = {c["id"]: c for c in project.get("categories", [])}
+    for category in validate_categories(categories):
+        if replace or category["id"] not in catalog:
+            catalog[category["id"]] = category
+    return {**project, "categories": validate_categories(list(catalog.values()))}
 
 
 def directory_project(payload: dict) -> tuple[Path, dict]:
@@ -833,6 +1185,19 @@ def create_server(
             route = urlsplit(self.path)
             try:
                 self.check_host()
+                if route.path == "/api/frame":
+                    values = parse_qs(route.query).get("index", [])
+                    if len(values) != 1:
+                        raise ValueError("One frame index is required")
+                    index = int(values[0])
+                    active = current_store()
+                    active.begin_frame_read()
+                    try:
+                        data = active.frame_jpeg(index)
+                    finally:
+                        active.end_frame_read()
+                    self.send(data, "image/jpeg")
+                    return
                 with session_lock:
                     if route.path == "/":
                         self.send(html if store else setup_html, "text/html; charset=utf-8")
@@ -842,6 +1207,10 @@ def create_server(
                         )
                     elif route.path == "/queue":
                         self.send(queue_html, "text/html; charset=utf-8")
+                    elif route.path == "/api/project/categories":
+                        if project is None:
+                            raise ValueError("Open a directory project first")
+                        self.json({"categories": project.get("categories", [])})
                     elif route.path == "/api/project":
                         self.json(
                             project_state(project, project_path, store)
@@ -864,8 +1233,14 @@ def create_server(
                             list_files(
                                 Path(query.get("path", [str(workspace)])[0]),
                                 query.get("kind", ["video"])[0],
+                                query.get("show_hidden", ["false"])[0] == "true",
                             )
                         )
+                    elif route.path == "/api/preview":
+                        values = parse_qs(route.query).get("path", [])
+                        if len(values) != 1 or not values[0]:
+                            raise ValueError("One video path is required")
+                        self.send(preview_jpeg(Path(values[0])), "image/jpeg")
                     elif route.path == "/api/state":
                         self.json(
                             {
@@ -878,11 +1253,6 @@ def create_server(
                                 else None,
                             }
                         )
-                    elif route.path == "/api/frame":
-                        values = parse_qs(route.query).get("index", [])
-                        if len(values) != 1:
-                            raise ValueError("One frame index is required")
-                        self.send(current_store().frame_jpeg(int(values[0])), "image/jpeg")
                     else:
                         self.json({"error": "Not found"}, 404)
             except (ValueError, TypeError, OSError, cv2.error) as error:
@@ -898,7 +1268,8 @@ def create_server(
                 if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
                     raise ValueError("JSON request required")
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= 32768:
+                limit = 524288 if self.path == "/api/frames" else 32768
+                if not 0 < length <= limit:
                     raise ValueError("Invalid request size")
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload, dict):
@@ -941,8 +1312,9 @@ def create_server(
                         item = candidate["items"][candidate["index"]]
                         replacement = open_store(item["video"], item["output"], item["suggestions"])
                         try:
+                            candidate = catalog_with_categories(candidate, replacement.categories)
                             write_project(path, candidate)
-                        except OSError:
+                        except (OSError, ValueError, TypeError):
                             replacement.close()
                             raise
                         previous, store = store, replacement
@@ -965,11 +1337,22 @@ def create_server(
                                 "reviewed_frames": len(store.labels),
                             }
                         )
+                    elif self.path == "/api/frames":
+                        frames = current_store().set_frames(payload.get("frames"))
+                        self.json({"ok": True, "frames": frames})
                     elif self.path == "/api/frame":
                         label = current_store().set_frame(
                             payload.get("frame"), payload.get("status"), payload.get("objects")
                         )
                         self.json({"ok": True, "label": label})
+                    elif self.path == "/api/categories/delete":
+                        result = current_store().delete_category(payload.get("category_id"))
+                        self.json({"ok": True, **result})
+                    elif self.path == "/api/marks/delete":
+                        result = current_store().delete_spatial_marks(
+                            payload.get("category_id"), payload.get("start"), payload.get("end")
+                        )
+                        self.json({"ok": True, **result})
                     elif self.path == "/api/events/promote":
                         label = current_store().promote_event(
                             payload.get("frame"), payload.get("index"), payload.get("id")
@@ -978,8 +1361,32 @@ def create_server(
                     elif self.path == "/api/events":
                         events = current_store().set_events(payload.get("events"))
                         self.json({"ok": True, "events": events})
+                    elif self.path == "/api/project/categories/add":
+                        if project is None:
+                            raise ValueError("Open a directory project first")
+                        category_id = payload.get("category_id")
+                        category = next(
+                            (c for c in project.get("categories", []) if c["id"] == category_id),
+                            None,
+                        )
+                        if category is None:
+                            raise ValueError("Choose a type from the directory catalog")
+                        current = current_store()
+                        if any(c["id"] == category_id for c in current.categories):
+                            raise ValueError("This type is already added to this video")
+                        categories = current.set_categories([*current.categories, category])
+                        self.json({"ok": True, "categories": categories})
                     elif self.path == "/api/categories":
-                        categories = current_store().set_categories(payload.get("categories"))
+                        clean = validate_categories(payload.get("categories"))
+                        if project is not None:
+                            previous_types = {c["id"]: c for c in current_store().categories}
+                            changed = [c for c in clean if previous_types.get(c["id"]) != c]
+                            candidate = catalog_with_categories(project, changed, replace=True)
+                            # Persist the reusable definition before attaching it to a video.
+                            # If video saving fails the catalog can still be used for retry.
+                            write_project(project_path, candidate)
+                            project = candidate
+                        categories = current_store().set_categories(clean)
                         self.json({"ok": True, "categories": categories})
                     elif self.path == "/api/clear":
                         current_store().clear_frame(payload.get("frame"))

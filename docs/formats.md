@@ -60,13 +60,44 @@ The `video` identity guards against accidentally resuming labels on another file
 
 ## API behavior for automation
 
+Frame JPEG requests prefetch up to 16 neighboring frames into a bounded 32 MiB
+JPEG cache using a separate background decoder. Its position does not affect the
+foreground decoder; reverse prefetch decodes contiguous windows forward. Buffering
+stops and the decoder closes when the video session closes. The browser separately
+bounds its decoded image cache to roughly 48 MiB (at least two frames).
+Navigation overlaps next-image loading with the outgoing atomic save.
+Fetching or prefetching never reviews or saves a frame. Single-step navigation keeps the last
+image visible until the next image is ready and the outgoing frame saves successfully.
+Only displayed frames are saved; frames skipped by a manual seek stay unreviewed.
+Held arrow keys start after 450 ms and present steps at the source video FPS,
+synchronized with browser animation frames using fractional deadlines (for example,
+25 or 29.97 FPS). At Step 1 this matches normal video speed in either direction;
+larger steps move proportionally faster. A decoded lookahead prepares images
+independently from annotation saving. Playback never skips intermediate held steps
+or catches up in a burst; missing images keep the last frame visible until ready.
+Outgoing displayed frames are saved in small atomic batches, normally every 150 ms.
+`POST /api/frames` accepts `{"frames":[{"frame":0,"status":"absent","objects":[]}]}`
+with 1–32 unique frames and the normal label schema, and returns `ok` and a `frames`
+map of the saved labels. Validation or writing failures roll back the whole batch.
+Frame requests use a separate decoder lock and do not wait for annotation writes;
+session closure waits for active frame readers before releasing video resources.
+
+Releasing the key stops presentation immediately and flushes pending batches.
+Save failure stops playback, retaining unsaved snapshots in browser memory; any
+subsequent mutation must retry that flush successfully first. Leaving or shutting
+down through the application waits for saving; closing the tab with pending frames
+triggers the unsaved-changes prompt. Single presses keep their existing step sizes
+and immediate outgoing-frame save.
+
+
 The local server returns the current state at `GET /api/state` and a JPEG at `GET /api/frame?index=N`. Mutations use JSON requests: `POST /api/frame` with `{"frame":N,"status":"annotated","objects":[...]}` or an `absent` label, `POST /api/clear` with `{"frame":N}`, and `POST /api/absent-range` with `{"start":N,"end":M}`. The range endpoint accepts at most 10,001 frames per request and replaces labels in the range. The server binds to loopback only; these endpoints are intended for local use.
 
 ## Resume and file selection
 
 Output may contain `last_annotated_frame`, the zero-based frame index of the latest save. Opening the output restores it. Older files restore the highest saved frame, or frame 0 when empty. `GET /api/state` includes `resume_frame`.
 
-With no CLI video, `/` serves file selection. `GET /api/setup` returns default directories. `GET /api/files?path=DIR&kind=video` lists folders and supported videos; `kind=json` lists JSON files. `POST /api/open` accepts local `video`, `output`, and optional `suggestions` paths. Existing output is validated before switching. Output must be JSON and distinct from inputs.
+With no CLI video, `/` serves file selection. `GET /api/setup` returns default directories. `GET /api/files?path=DIR&kind=video` lists folders and supported videos; `kind=json` lists JSON files. Dot-prefixed files and folders are hidden by default;
+`show_hidden=true` includes them. `POST /api/open` accepts local `video`, `output`, and optional `suggestions` paths. Existing output is validated before switching. Output must be JSON and distinct from inputs.
 
 The initial input directory and the default `/api/files` path are the application
 workspace: the repository directory when running `run.py`, or the executable's
@@ -95,7 +126,11 @@ A directory project is separate from annotation output. It uses absolute local p
 nonempty, fixed ordered queue. Annotation JSON accepts v1, v2 and v3 as described below. Completion is
 computed from reviewed frame keys, never from `last_annotated_frame` alone. Files with invalid
 output labels are displayed as errors. Unopened videos without output have unknown frame
-counts until opened; preview does not decode them. Full video identity is checked on opening.
+counts until opened. Queue metadata preview does not decode videos. The UI lazily
+requests `GET /api/preview?path=VIDEO` for a first-frame JPEG thumbnail (at most
+320×180 pixels). This releases its decoder after each request, does not open an
+annotation session, and does not write or mark any frames reviewed. Invalid or
+undecodable videos return an error; the UI shows a placeholder. Full video identity is checked on opening.
 
 Directory scanning supports MP4, MOV, MKV, AVI and WebM, sorts naturally, and optionally
 includes subdirectories. For `sub/clip.mp4`, suggestions candidates are
@@ -322,3 +357,52 @@ Queue completion continues to measure reviewed spatial frames, not event coverag
 Categories referenced by any event or event suggestion cannot be deleted or
 changed to `entity`. Legacy frame-only suggestions keep their original review
 behavior: leaving a frame saves its displayed spatial suggestions.
+
+
+## Timeline deletion
+
+Right-clicking a track title opens a menu; choosing **Удалить** deletes its type and all spatial and temporal marks
+for the current video. `POST /api/categories/delete` accepts `{"category_id":"id"}`.
+This explicit operation can remove a used type; ordinary catalog updates still reject
+removing types in use. The deletion saves atomically and rolls back all state on error.
+Other types and previously unreviewed frames are preserved. A reviewed frame whose
+last object was removed remains reviewed with `status: "absent"`.
+
+Output may include `deleted_categories`, an array of removed type IDs. It prevents
+source suggestions from recreating deleted types or their marks when reopening.
+Source files are unchanged. Explicitly reimporting a removed type clears its ID from
+this list. Older versions do not honor this suppression list.
+
+Choosing **Удалить** from a temporal mark's context menu records `status: "rejected"` using `/api/events`,
+so source predictions do not reappear. Choosing **Удалить** from a spatial run's context menu removes that
+type's objects in its inclusive frame range, preserving other objects. The endpoint
+`POST /api/marks/delete` accepts `category_id`, `start`, `end`; affected frames are
+saved as reviewed, including absence if no objects remain. Temporal events are kept.
+Both deletion endpoints return `ok: true` and the updated state from `/api/state`.
+
+
+## Directory type catalog
+
+Directory projects store a shared `categories` array in `annotation-project.json`
+(the output directory). It uses the same validated type schema as video output;
+older projects without this field start with an empty catalog. Opening a video
+registers its existing types in the catalog without attaching catalog-only types
+to that video. Creating/importing/updating types through `/api/categories` also
+saves their definitions in the project catalog. Project saves remain atomic.
+The catalog is saved before video output; if the subsequent video save fails,
+the reusable definition remains in the catalog for retry, and video state rolls back.
+
+`GET /api/project/categories` returns the project's `categories`.
+`POST /api/project/categories/add` accepts `{"category_id":"id"}` and copies that
+definition to the current video's categories, returning `ok` and `categories`.
+Unknown IDs and already attached types are rejected. Adding a type saves its
+selection without reviewing any frames. Types are selected independently per
+video, including videos with no marks yet. Existing output restores its selected
+types; a fresh video starts without catalog-only tracks. Suggestions retain their
+existing type behavior. The directory picker button lists all reusable types and
+indicates those already added to this video.
+
+Deleting a track in directory mode removes its type and all marks from this video
+only. Its definition remains available in the project catalog for other videos
+or explicit reattachment. Deleting or renaming a local type does not rewrite the
+annotation files of other queue items. Single-video mode has no directory catalog.
